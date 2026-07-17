@@ -1,2 +1,0 @@
-python-telegram-bot[ext]==21.10
-python-dotenv==1.1.0
