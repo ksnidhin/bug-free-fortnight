@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -104,32 +105,91 @@ logger = logging.getLogger("modbot")
 # Link detection
 # ---------------------------------------------------------------------------
 
-# Matches http(s):// URLs, t.me/ links, www. links, and bare domains with a
-# common TLD (e.g. "example.com/page", "bit.ly/xyz"). Case-insensitive.
+# Matches http(s):// URLs, t.me/telegram.me links, www. links, hxxp-mangled
+# schemes, dot-substituted domains ("example dot com"), and bare domains
+# with a (deliberately broad) TLD list including ones spam/ad networks
+# favor precisely because generic filters don't expect them.
+# Case-insensitive. Applied to text that has already been run through
+# _normalize_for_link_scan() to defeat invisible-character and homoglyph
+# obfuscation — see that function for why.
 LINK_REGEX = re.compile(
-    r"(?:https?://|t\.me/|www\.)\S+"
-    r"|\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\."
+    r"(?:https?://|hxxps?://|t\.me/|telegram\.me/|www\.)\S+"
+    r"|\bt\s*\.\s*me\b(?:/\S*)?"
+    r"|\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(?:\.|\s+dot\s+|\(dot\)|\[dot\])"
     r"(?:com|net|org|io|me|co|info|biz|xyz|dev|app|gg|link|club|ru|uk|de|cn|"
-    r"us|in|to|ly|gl|tv|shop|online|site|store)\b(?:/\S*)?",
+    r"us|in|to|ly|gl|tv|shop|online|site|store|vip|cc|pw|icu|top|cfd|sbs|"
+    r"cyou|rest|click|fun|life|mov|zip|bond|win|bar|monster|website)\b(?:/\S*)?",
     re.IGNORECASE,
 )
 
 _LINK_ENTITY_TYPES = {"url", "text_link"}
 
+# Invisible/zero-width characters spam bots insert mid-URL to break naive
+# string/regex matching while the message still looks normal to a human
+# reader (e.g. "t​.​me/xyz" with U+200B between every character).
+_INVISIBLE_CHARS_TRANSLATION = str.maketrans(
+    "", "", "\u200b\u200c\u200d\u2060\ufeff\u00ad\u2028\u2029"
+)
+
+# Cyrillic/Greek/other look-alike letters (and look-alike punctuation)
+# commonly swapped in for their Latin equivalents so a link *looks*
+# identical to a human but doesn't match a Latin-only regex. The Cyrillic
+# "т" (U+0442) in particular is pixel-identical to Latin "t" in most fonts
+# and is a classic trick for disguising "t.me" links specifically.
+_HOMOGLYPH_TRANSLATION = str.maketrans(
+    {
+        "а": "a", "А": "A",
+        "е": "e", "Е": "E",
+        "о": "o", "О": "O",
+        "р": "p", "Р": "P",
+        "с": "c", "С": "C",
+        "у": "y", "У": "Y",
+        "х": "x", "Х": "X",
+        "т": "t", "Т": "T",
+        "м": "m", "М": "M",
+        "і": "i", "І": "I",
+        "ѕ": "s", "Ѕ": "S",
+        "ј": "j", "Ј": "J",
+        "ԁ": "d",
+        "ɡ": "g",
+        "һ": "h", "Һ": "H",
+        "ⅼ": "l",
+        "∕": "/", "⁄": "/",
+        "。": ".", "．": ".", "｡": ".", "·": ".", "・": ".",
+    }
+)
+
+
+def _normalize_for_link_scan(text: str) -> str:
+    """Strip invisible characters, collapse Unicode compatibility forms
+    (e.g. fullwidth punctuation), and map look-alike homoglyphs to their
+    plain-Latin equivalents, so the regex below sees the link the way a
+    human actually reads it rather than the disguised raw bytes.
+    """
+    if not text:
+        return ""
+    text = text.translate(_INVISIBLE_CHARS_TRANSLATION)
+    text = unicodedata.normalize("NFKC", text)
+    text = text.translate(_HOMOGLYPH_TRANSLATION)
+    return text
+
 
 def _message_contains_link(msg: Message) -> bool:
     """Return True if *msg* contains a link — via Telegram-parsed entities,
-    a regex fallback over the text/caption, or a URL attached to an inline
-    keyboard button. Promotional/ad bots frequently place their invite link
-    only on a button (e.g. "Join Channel") with no link in the visible text,
-    so the button URLs must be checked too.
+    a normalized regex scan of the text/caption (defeating invisible-char
+    and homoglyph obfuscation), or a URL attached to an inline keyboard
+    button. Promotional/ad bots frequently place their invite link only on
+    a button (e.g. "Join Channel") with no link in the visible text, so the
+    button URLs must be checked too.
     """
     entities = list(msg.entities or []) + list(msg.caption_entities or [])
     for ent in entities:
         if ent.type in _LINK_ENTITY_TYPES:
             return True
 
-    text = msg.text or msg.caption or ""
+    raw_text = msg.text or msg.caption or ""
+    text = _normalize_for_link_scan(raw_text)
     if text and LINK_REGEX.search(text):
         return True
 
