@@ -4,3 +4,4 @@ asyncpg>=0.29.0
 pyrogram>=2.0.106
 google-genai>=0.3.0
 groq>=0.4.2
+aiosqlite>=0.20.0
