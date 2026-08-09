@@ -2,6 +2,13 @@ import os
 import sys
 import logging
 import asyncio
+
+# Workaround for Pyrogram asyncio bug on Python 3.10+
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.enums import MessageEntityType
