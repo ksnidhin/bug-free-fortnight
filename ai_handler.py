@@ -132,7 +132,11 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
                 model=model,
                 messages=groq_messages,
             )
-            return completion.choices[0].message.content
+            raw_content = completion.choices[0].message.content
+            # Remove <think>...</think> blocks from reasoning models like Qwen
+            import re
+            content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+            return content
         except Exception as e:
             logger.error(f"Groq API error: {e}")
             
