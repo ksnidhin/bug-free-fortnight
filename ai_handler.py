@@ -95,7 +95,11 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
             gemini_contents = []
             for msg in history:
                 role = "user" if msg["role"] == "user" else "model"
-                gemini_contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                parts = [{"text": msg["content"]}]
+                if base64_image and msg == history[-1] and role == "user":
+                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
+                    
+                gemini_contents.append({"role": role, "parts": parts})
                 
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash', 
@@ -109,20 +113,12 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
     # 2. Fallback to Groq
     if groq_client:
         try:
-            model = "llama-3.2-90b-vision-preview" if base64_image else "llama-3.3-70b-versatile"
+            model = "llama-3.3-70b-versatile"
             groq_messages = [{"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
-                content = msg["content"]
-                
-                # Attach image to the most recent user prompt
-                if base64_image and msg == history[-1] and role == "user":
-                    content = [
-                        {"type": "text", "text": msg["content"]},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                    
-                groq_messages.append({"role": role, "content": content})
+                # Strip out any images if passed, Groq currently has no vision models available
+                groq_messages.append({"role": role, "content": msg["content"]})
                 
             completion = await groq_client.chat.completions.create(
                 model=model,
