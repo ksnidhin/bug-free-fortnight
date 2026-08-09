@@ -231,7 +231,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash', 
                 contents=gemini_contents,
-                config={"system_instruction": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}
+                config={"system_instruction": "You are a nonchalant mafia boss in a Telegram group. You speak casually, naturally, and with quiet authority. You never use bullet points, hyphens, or robotic lists. Keep it short, human, slightly intimidating but relaxed. Do not sound like an AI."}
             )
             return response.text
         except Exception as e:
@@ -241,7 +241,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
     if groq_client:
         try:
             model = "qwen/qwen3.6-27b" if base64_image else "llama-3.3-70b-versatile"
-            groq_messages = [{"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}]
+            groq_messages = [{"role": "system", "content": "You are a nonchalant mafia boss in a Telegram group. You speak casually, naturally, and with quiet authority. You never use bullet points, hyphens, or robotic lists. Keep it short, human, slightly intimidating but relaxed. Do not sound like an AI."}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
                 content = msg["content"]
