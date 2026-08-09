@@ -1372,6 +1372,164 @@ def _resolve_target_user(msg: Message, context: ContextTypes.DEFAULT_TYPE) -> in
     return None
 
 
+
+# ---------------------------------------------------------------------------
+# Standard Moderation Commands
+# ---------------------------------------------------------------------------
+
+def parse_duration(duration_str: str) -> int:
+    """Parse strings like '1m', '60s', '1h', '1d' into seconds."""
+    if not duration_str:
+        return 86400  # 24 hours default
+        
+    duration_str = duration_str.lower().strip()
+    try:
+        if duration_str.endswith('s'):
+            return int(duration_str[:-1])
+        elif duration_str.endswith('m'):
+            return int(duration_str[:-1]) * 60
+        elif duration_str.endswith('h'):
+            return int(duration_str[:-1]) * 3600
+        elif duration_str.endswith('d'):
+            return int(duration_str[:-1]) * 86400
+        else:
+            return int(duration_str)  # assume seconds if no suffix
+    except ValueError:
+        return 86400
+
+async def _get_target_user(update, context) -> int | None:
+    """Helper to extract target user_id from reply or args."""
+    msg = update.effective_message
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        return msg.reply_to_message.from_user.id
+        
+    if context.args:
+        try:
+            return int(context.args[0])
+        except ValueError:
+            pass
+            
+    return None
+
+async def cmd_mute(update, context) -> None:
+    msg = update.effective_message
+    user = msg.from_user
+    if not await _is_admin(update, user.id):
+        await msg.reply_text("🚫 You don't have permission to use this command.")
+        return
+
+    target_id = await _get_target_user(update, context)
+    if not target_id:
+        await msg.reply_text("⚠️ Reply to a user or provide their ID to mute them.")
+        return
+
+    duration_str = context.args[1] if len(context.args) > 1 else (context.args[0] if context.args and not context.args[0].isdigit() else "24h")
+    if msg.reply_to_message and context.args:
+        duration_str = context.args[0]
+
+    seconds = parse_duration(duration_str)
+    
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=msg.chat_id,
+            user_id=target_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        )
+        await msg.reply_text(f"✅ User {target_id} has been muted for {seconds} seconds.")
+        if msg.reply_to_message:
+            await msg.reply_to_message.delete()
+    except Exception as e:
+        await msg.reply_text(f"⚠️ Failed to mute user: {e}")
+
+async def cmd_unmute(update, context) -> None:
+    msg = update.effective_message
+    user = msg.from_user
+    if not await _is_admin(update, user.id):
+        await msg.reply_text("🚫 You don't have permission to use this command.")
+        return
+
+    target_id = await _get_target_user(update, context)
+    if not target_id:
+        await msg.reply_text("⚠️ Reply to a user or provide their ID to unmute them.")
+        return
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=msg.chat_id,
+            user_id=target_id,
+            permissions=ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+                can_add_web_page_previews=True, can_change_info=True, can_invite_users=True,
+                can_pin_messages=True
+            )
+        )
+        await msg.reply_text(f"✅ User {target_id} has been unmuted.")
+    except Exception as e:
+        await msg.reply_text(f"⚠️ Failed to unmute user: {e}")
+
+async def cmd_ban(update, context) -> None:
+    msg = update.effective_message
+    user = msg.from_user
+    if not await _is_admin(update, user.id):
+        await msg.reply_text("🚫 You don't have permission to use this command.")
+        return
+
+    target_id = await _get_target_user(update, context)
+    if not target_id:
+        await msg.reply_text("⚠️ Reply to a user or provide their ID to ban them.")
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat_id=msg.chat_id, user_id=target_id)
+        await msg.reply_text(f"✅ User {target_id} has been banned.")
+        if msg.reply_to_message:
+            await msg.reply_to_message.delete()
+    except Exception as e:
+        await msg.reply_text(f"⚠️ Failed to ban user: {e}")
+
+async def cmd_unban(update, context) -> None:
+    msg = update.effective_message
+    user = msg.from_user
+    if not await _is_admin(update, user.id):
+        await msg.reply_text("🚫 You don't have permission to use this command.")
+        return
+
+    target_id = await _get_target_user(update, context)
+    if not target_id:
+        await msg.reply_text("⚠️ Reply to a user or provide their ID to unban them.")
+        return
+
+    try:
+        await context.bot.unban_chat_member(chat_id=msg.chat_id, user_id=target_id, only_if_banned=True)
+        await msg.reply_text(f"✅ User {target_id} has been unbanned.")
+    except Exception as e:
+        await msg.reply_text(f"⚠️ Failed to unban user: {e}")
+
+async def cmd_kick(update, context) -> None:
+    msg = update.effective_message
+    user = msg.from_user
+    if not await _is_admin(update, user.id):
+        await msg.reply_text("🚫 You don't have permission to use this command.")
+        return
+
+    target_id = await _get_target_user(update, context)
+    if not target_id:
+        await msg.reply_text("⚠️ Reply to a user or provide their ID to kick them.")
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat_id=msg.chat_id, user_id=target_id)
+        await context.bot.unban_chat_member(chat_id=msg.chat_id, user_id=target_id)
+        await msg.reply_text(f"✅ User {target_id} has been kicked.")
+        if msg.reply_to_message:
+            await msg.reply_to_message.delete()
+    except Exception as e:
+        await msg.reply_text(f"⚠️ Failed to kick user: {e}")
+
+
 async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/auth <user_id> — owner-only. Grant a user moderator rights, even if
     they are not a Telegram group admin. Can also be used by replying to
@@ -1638,6 +1796,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_mod:
         lines += [
             "",
+            
+            "<b>User Management</b>",
+            "/mute &lt;user&gt; [time] — mute a user (e.g. /mute 1h, defaults to 24h)",
+            "/unmute &lt;user&gt; — unmute a user",
+            "/ban &lt;user&gt; — permanently ban a user",
+            "/unban &lt;user&gt; — unban a user",
+            "/kick &lt;user&gt; — kick a user (ban + unban)",
+            "",
             "<b>Moderation</b>",
             "/lock &lt;uid&gt; — block a media item (reply or pass UID)",
             "/lock pack — block an entire sticker pack (reply to a sticker)",
@@ -1720,6 +1886,11 @@ def build_application() -> Application:
     )
 
     # Commands
+        app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("ban", cmd_ban))
+    app.add_handler(CommandHandler("unban", cmd_unban))
+    app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
