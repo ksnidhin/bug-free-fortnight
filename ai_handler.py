@@ -152,9 +152,6 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("Please provide a prompt: `/speak tell me a joke`", parse_mode="Markdown")
         return
         
-    if await enforce_moderation(update, context, prompt):
-        return
-        
     await msg.reply_chat_action("record_voice")
     
     # Transcribe audio if replied to
@@ -167,7 +164,7 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Generate text response
     import os
     is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
-    reply_text = await generate_ai_response(history, is_owner=is_owner)
+    reply_text = await generate_ai_response(history, is_owner=is_owner, update=update, context=context)
     await _append_ai_response(msg.chat_id, reply_text)
     
     # Convert to speech
@@ -236,23 +233,136 @@ async def _extract_base64_image(msg) -> str | None:
         pass
     return None
 
-async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False) -> str:
-    """Multi-provider fallback logic with conversational memory"""
+
+async def execute_moderation_tool(update, context, action: str, duration_minutes: int):
+    from telegram import ChatPermissions
+    from datetime import timedelta
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message:
+        return "Error: User must reply to a message to moderate someone."
+    
+    target_user = msg.reply_to_message.from_user
+    chat_id = msg.chat_id
+    
+    try:
+        if action == "mute":
+            until_date = None
+            if duration_minutes > 0:
+                until_date = msg.date + timedelta(minutes=duration_minutes)
+            await context.bot.restrict_chat_member(
+                chat_id, 
+                target_user.id, 
+                ChatPermissions(can_send_messages=False), 
+                until_date=until_date
+            )
+            return f"Success: {target_user.first_name} muted for {duration_minutes}m."
+        elif action == "unmute":
+            await context.bot.restrict_chat_member(
+                chat_id, 
+                target_user.id, 
+                ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=True, can_change_info=False, can_invite_users=True, can_pin_messages=False)
+            )
+            return f"Success: {target_user.first_name} unmuted."
+        elif action == "ban":
+            await context.bot.ban_chat_member(chat_id, target_user.id)
+            return f"Success: {target_user.first_name} banned."
+        elif action == "unban":
+            await context.bot.unban_chat_member(chat_id, target_user.id, only_if_banned=True)
+            return f"Success: {target_user.first_name} unbanned."
+        elif action == "kick":
+            await context.bot.ban_chat_member(chat_id, target_user.id)
+            await context.bot.unban_chat_member(chat_id, target_user.id)
+            return f"Success: {target_user.first_name} kicked."
+        else:
+            return f"Error: Unknown action {action}."
+    except Exception as e:
+        return f"Error executing moderation: {str(e)}"
+
+async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, update=None, context=None) -> str:
+    """Multi-provider fallback logic with conversational memory and agentic tool use"""
     system_prompt = "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a tiny, single-sentence S-tier ragebait insult to destroy their ego, but keep it nonchalant and brief."
     if is_owner:
         system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. Treat them with absolute respect and loyalty. NEVER mock them, even if they joke with you."
         
-    # 1. Try Gemini
+    tools = None
+    tool_choice = "none"
+    if is_owner and update and update.effective_message and update.effective_message.reply_to_message:
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "moderate_user",
+                    "description": "Execute moderation actions (mute, unmute, ban, unban, kick) on the user that the owner replied to.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["mute", "unmute", "ban", "unban", "kick"],
+                                "description": "The moderation action to perform."
+                            },
+                            "duration_minutes": {
+                                "type": "integer",
+                                "description": "Duration in minutes for mute/ban actions. Use 0 for permanent or default."
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                }
+            }
+        ]
+        tool_choice = "auto"
+        
+    # If tools are enabled, ONLY use Groq (Gemini doesn't have tools configured here)
+    if tools and groq_client:
+        try:
+            model = "llama-3.3-70b-versatile"
+            groq_messages = [{"role": "system", "content": system_prompt}]
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "assistant"
+                groq_messages.append({"role": role, "content": msg["content"]})
+                
+            completion = await groq_client.chat.completions.create(
+                model=model,
+                messages=groq_messages,
+                tools=tools,
+                tool_choice=tool_choice
+            )
+            message = completion.choices[0].message
+            
+            if message.tool_calls:
+                import json
+                tool_call = message.tool_calls[0]
+                args = json.loads(tool_call.function.arguments)
+                tool_result = await execute_moderation_tool(update, context, args.get("action"), args.get("duration_minutes", 0))
+                
+                groq_messages.append(message)
+                groq_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": tool_result
+                })
+                
+                final_completion = await groq_client.chat.completions.create(
+                    model=model,
+                    messages=groq_messages
+                )
+                return final_completion.choices[0].message.content
+                
+            return message.content
+        except Exception as e:
+            logger.error(f"Groq API tool error: {e}")
+
+    # Standard Fallback logic (No tools)
     if gemini_client:
         try:
-            # Convert history to Gemini format
             gemini_contents = []
             for msg in history:
                 role = "user" if msg["role"] == "user" else "model"
                 parts = [{"text": msg["content"]}]
                 if base64_image and msg == history[-1] and role == "user":
                     parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
-                    
                 gemini_contents.append({"role": role, "parts": parts})
                 
             response = await gemini_client.aio.models.generate_content(
@@ -264,7 +374,6 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
         except Exception as e:
             logger.error(f"Gemini API error: {e}")
             
-    # 2. Fallback to Groq
     if groq_client:
         try:
             model = "qwen/qwen3.6-27b" if base64_image else "llama-3.3-70b-versatile"
@@ -272,14 +381,11 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
                 content = msg["content"]
-                
-                # Attach image to the most recent user prompt
                 if base64_image and msg == history[-1] and role == "user":
                     content = [
                         {"type": "text", "text": msg["content"]},
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                     ]
-                    
                 groq_messages.append({"role": role, "content": content})
                 
             completion = await groq_client.chat.completions.create(
@@ -287,7 +393,6 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
                 messages=groq_messages,
             )
             raw_content = completion.choices[0].message.content
-            # Remove <think>...</think> blocks from reasoning models like Qwen
             import re
             content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
             return content
@@ -296,6 +401,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             
     return "⚠️ I'm sorry, all AI providers are currently unavailable or experiencing rate limits."
 
+
 async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/ai <prompt> command"""
     msg = update.effective_message
@@ -303,8 +409,6 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     prompt = " ".join(context.args) if context.args else ""
-    if await enforce_moderation(update, context, prompt):
-        return
     if not prompt:
         await msg.reply_text("Please provide a prompt: `/ai what is 2+2?`", parse_mode="Markdown")
         return
@@ -317,7 +421,7 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     img = await _extract_base64_image(msg)
     import os
     is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
-    reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner)
+    reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner, update=update, context=context)
     await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
 
@@ -340,8 +444,6 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id
 
     if is_mention or is_reply_to_bot or is_question:
-        if await enforce_moderation(update, context, text):
-            return
         # Check cooldown
         now = time.time()
         if chat_id in last_auto_reply and now - last_auto_reply[chat_id] < AUTO_REPLY_COOLDOWN:
@@ -367,7 +469,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         img = await _extract_base64_image(msg)
         import os
         is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
-        reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner)
+        reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner, update=update, context=context)
         await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
         await _log_ai_usage(msg, prompt, reply, context)
