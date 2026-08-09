@@ -869,7 +869,10 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     msg = update.effective_message
     if msg is None:
         return
-    await _enforce_link_blacklist(msg, context)
+    if await _enforce_link_blacklist(msg, context):
+        return
+        
+    await check_auto_ai(update, context)
 
 
 # ---------------------------------------------------------------------------
