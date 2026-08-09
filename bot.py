@@ -1886,7 +1886,7 @@ def build_application() -> Application:
     )
 
     # Commands
-        app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("mute", cmd_mute))
     app.add_handler(CommandHandler("unmute", cmd_unmute))
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("unban", cmd_unban))
