@@ -184,7 +184,7 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 json={
                     "model": "canopylabs/orpheus-v1-english",
                     "input": reply_text,
-                    "voice": "tara",
+                    "voice": "diana",
                     "response_format": "wav"
                 },
                 timeout=30.0
