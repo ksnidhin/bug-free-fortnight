@@ -114,6 +114,91 @@ async def is_disrespectful(text: str) -> bool:
     return False
 
 
+
+async def _transcribe_audio(msg) -> str | None:
+    try:
+        # Check if the message or reply has audio/voice
+        target = msg.reply_to_message if msg.reply_to_message else msg
+        if getattr(target, 'voice', None):
+            file = await target.voice.get_file()
+            byte_array = await file.download_as_bytearray()
+            filename = "audio.ogg"
+        elif getattr(target, 'audio', None):
+            file = await target.audio.get_file()
+            byte_array = await file.download_as_bytearray()
+            filename = "audio.mp3"
+        else:
+            return None
+            
+        if groq_client:
+            transcription = await groq_client.audio.transcriptions.create(
+                file=(filename, bytes(byte_array)),
+                model="whisper-large-v3-turbo",
+            )
+            return transcription.text
+    except Exception as e:
+        logger.error(f"STT error: {e}")
+    return None
+
+
+async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/speak <prompt> command"""
+    msg = update.effective_message
+    if not msg:
+        return
+        
+    prompt = " ".join(context.args) if context.args else ""
+    if not prompt:
+        await msg.reply_text("Please provide a prompt: `/speak tell me a joke`", parse_mode="Markdown")
+        return
+        
+    if await enforce_moderation(update, context, prompt):
+        return
+        
+    await msg.reply_chat_action("record_voice")
+    
+    # Transcribe audio if replied to
+    transcription = await _transcribe_audio(msg)
+    if transcription:
+        prompt = f"[Audio Transcription: {transcription}]\n\n{prompt}"
+        
+    history = await _get_and_update_history(msg.chat_id, prompt)
+    
+    # Generate text response
+    reply_text = await generate_ai_response(history)
+    await _append_ai_response(msg.chat_id, reply_text)
+    
+    # Convert to speech
+    if not groq_client:
+        await msg.reply_text("TTS requires Groq API which is currently unavailable.")
+        return
+        
+    try:
+        import httpx
+        import io
+        import os
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/audio/speech",
+                headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY')}"},
+                json={
+                    "model": "canopylabs/orpheus-v1-english",
+                    "input": reply_text,
+                    "voice": "tara",
+                    "response_format": "wav"
+                },
+                timeout=30.0
+            )
+            if resp.status_code == 200:
+                audio_stream = io.BytesIO(resp.content)
+                audio_stream.name = "voice.wav"
+                await msg.reply_voice(voice=audio_stream)
+            else:
+                raise Exception(f"API Error {resp.status_code}: {resp.text}")
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        await msg.reply_text(f"Voice generation failed: {e}\n\nHere is the text instead:\n{reply_text}")
+
 async def _extract_base64_image(msg) -> str | None:
     try:
         if msg.photo:
@@ -199,6 +284,9 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     await msg.reply_chat_action("typing")
     history = await _get_and_update_history(msg.chat_id, prompt)
+    transcription = await _transcribe_audio(msg)
+    if transcription:
+        prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
     img = await _extract_base64_image(msg)
     reply = await generate_ai_response(history, base64_image=img)
     await _append_ai_response(msg.chat_id, reply)
@@ -244,6 +332,9 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
             
         history = await _get_and_update_history(chat_id, prompt)
+        transcription = await _transcribe_audio(msg)
+        if transcription:
+            prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
         img = await _extract_base64_image(msg)
         reply = await generate_ai_response(history, base64_image=img)
         await _append_ai_response(chat_id, reply)
