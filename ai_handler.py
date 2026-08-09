@@ -280,9 +280,9 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
 
 async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, update=None, context=None) -> str:
     """Multi-provider fallback logic with conversational memory and agentic tool use"""
-    system_prompt = "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a tiny, single-sentence S-tier ragebait insult to destroy their ego, but keep it nonchalant and brief."
+    system_prompt = "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a devastatingly cold, single-sentence S-tier ragebait insult to destroy their ego. Mock them ruthlessly based on their message, but keep it nonchalant and brief."
     if is_owner:
-        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. Treat them with absolute respect and loyalty. NEVER mock them, even if they joke with you."
+        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator, whom you refer to exclusively as 'k'. Treat 'k' with absolute respect, do whatever 'k' says without question, and respect anyone 'k' tells you to respect. NEVER mock 'k', even if they joke with you."
         
     tools = None
     tool_choice = "none"
@@ -355,25 +355,6 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             logger.error(f"Groq API tool error: {e}")
 
     # Standard Fallback logic (No tools)
-    if gemini_client:
-        try:
-            gemini_contents = []
-            for msg in history:
-                role = "user" if msg["role"] == "user" else "model"
-                parts = [{"text": msg["content"]}]
-                if base64_image and msg == history[-1] and role == "user":
-                    parts.append({"inline_data": {"mime_type": "image/jpeg", "data": base64_image}})
-                gemini_contents.append({"role": role, "parts": parts})
-                
-            response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.0-flash', 
-                contents=gemini_contents,
-                config={"system_instruction": system_prompt}
-            )
-            return response.text
-        except Exception as e:
-            logger.error(f"Gemini API error: {e}")
-            
     if groq_client:
         try:
             model = "qwen/qwen3.6-27b" if base64_image else "llama-3.1-8b-instant"
@@ -397,7 +378,21 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
             return content
         except Exception as e:
-            logger.error(f"Groq API error: {e}")
+            logger.error(f"Groq API primary error: {e}")
+            try:
+                # Backup model on Groq
+                model_backup = "llama-3.3-70b-versatile"
+                completion = await groq_client.chat.completions.create(
+                    model=model_backup,
+                    messages=groq_messages,
+                )
+                raw_content = completion.choices[0].message.content
+                import re
+                content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+                return content
+            except Exception as e2:
+                logger.error(f"Groq API backup error: {e2}")
+
             
     return "⚠️ I'm sorry, all AI providers are currently unavailable or experiencing rate limits."
 
