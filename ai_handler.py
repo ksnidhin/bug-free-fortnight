@@ -165,7 +165,9 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     history = await _get_and_update_history(msg.chat_id, prompt)
     
     # Generate text response
-    reply_text = await generate_ai_response(history)
+    import os
+    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
+    reply_text = await generate_ai_response(history, is_owner=is_owner)
     await _append_ai_response(msg.chat_id, reply_text)
     
     # Convert to speech
@@ -234,8 +236,12 @@ async def _extract_base64_image(msg) -> str | None:
         pass
     return None
 
-async def generate_ai_response(history: list[dict], base64_image: str = None) -> str:
+async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False) -> str:
     """Multi-provider fallback logic with conversational memory"""
+    system_prompt = "You are a nonchalant mafia boss in a Telegram group. You speak casually, naturally, and with quiet authority. You never use bullet points, hyphens, or robotic lists. Keep it short, human, slightly intimidating but relaxed. Do not sound like an AI. If someone makes a joke about you, mocks you, or plays around, instantly deliver an S-tier ragebait insult to mock them based on what they just said. Be ruthless, condescending, and deeply insulting in a calm, nonchalant way. Destroy their ego effortlessly without breaking character."
+    if is_owner:
+        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. Treat them with absolute respect and loyalty. NEVER mock them, even if they joke with you."
+        
     # 1. Try Gemini
     if gemini_client:
         try:
@@ -252,7 +258,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash', 
                 contents=gemini_contents,
-                config={"system_instruction": "You are a nonchalant mafia boss in a Telegram group. You speak casually, naturally, and with quiet authority. You never use bullet points, hyphens, or robotic lists. Keep it short, human, slightly intimidating but relaxed. Do not sound like an AI. If someone makes a joke about you, mocks you, or plays around, instantly deliver an S-tier ragebait insult to mock them based on what they just said. Be ruthless, condescending, and deeply insulting in a calm, nonchalant way. Destroy their ego effortlessly without breaking character."}
+                config={"system_instruction": system_prompt}
             )
             return response.text
         except Exception as e:
@@ -262,7 +268,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
     if groq_client:
         try:
             model = "qwen/qwen3.6-27b" if base64_image else "llama-3.3-70b-versatile"
-            groq_messages = [{"role": "system", "content": "You are a nonchalant mafia boss in a Telegram group. You speak casually, naturally, and with quiet authority. You never use bullet points, hyphens, or robotic lists. Keep it short, human, slightly intimidating but relaxed. Do not sound like an AI. If someone makes a joke about you, mocks you, or plays around, instantly deliver an S-tier ragebait insult to mock them based on what they just said. Be ruthless, condescending, and deeply insulting in a calm, nonchalant way. Destroy their ego effortlessly without breaking character."}]
+            groq_messages = [{"role": "system", "content": system_prompt}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
                 content = msg["content"]
@@ -309,10 +315,11 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if transcription:
         prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
     img = await _extract_base64_image(msg)
-    reply = await generate_ai_response(history, base64_image=img)
+    import os
+    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
+    reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner)
     await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
-    await _log_ai_usage(msg, prompt, reply, context)
 
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if we should auto-reply to a question."""
@@ -358,7 +365,9 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if transcription:
             prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
         img = await _extract_base64_image(msg)
-        reply = await generate_ai_response(history, base64_image=img)
+        import os
+        is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
+        reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner)
         await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
         await _log_ai_usage(msg, prompt, reply, context)
