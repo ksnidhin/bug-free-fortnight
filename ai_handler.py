@@ -5,6 +5,9 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from google import genai
 from groq import AsyncGroq
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger("aibot")
 
