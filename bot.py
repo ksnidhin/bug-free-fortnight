@@ -54,7 +54,7 @@ from dotenv import load_dotenv
 from telegram import ChatPermissions, Message, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
-from ai_handler import cmd_ai, check_auto_ai
+from ai_handler import cmd_ai, check_auto_ai, is_disrespectful
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -871,7 +871,32 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if await _enforce_link_blacklist(msg, context):
         return
-        
+    if msg.text:
+        if await is_disrespectful(msg.text):
+            user = msg.from_user
+            user_id = user.id if user else 0
+            # Don't mute admins/owners
+            if not await _is_admin(update, user_id):
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                try:
+                    await context.bot.restrict_chat_member(
+                        chat_id=msg.chat_id,
+                        user_id=user_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+                    )
+                    await context.bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=f"🚫 {user.mention_html() if user else 'User'} has been muted for 60s for toxic/disrespectful behavior.",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                return
+
     await check_auto_ai(update, context)
 
 

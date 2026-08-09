@@ -41,6 +41,35 @@ async def _append_ai_response(chat_id: int, response: str):
         chat_histories[chat_id].append({"role": "assistant", "content": response})
 
 
+async def is_disrespectful(text: str) -> bool:
+    """Use AI to determine if a message is highly disrespectful or toxic."""
+    prompt = f"Analyze the following message. Is it highly disrespectful, toxic, or directly mocking? Reply ONLY with the exact word YES or the exact word NO. Do not explain. Message: {text}"
+    
+    if groq_client:
+        try:
+            completion = await groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_completion_tokens=5,
+            )
+            response = completion.choices[0].message.content.strip().upper()
+            return "YES" in response
+        except Exception as e:
+            logger.error(f"Groq Moderation error: {e}")
+            
+    if gemini_client:
+        try:
+            response = await gemini_client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+            )
+            return "YES" in response.text.strip().upper()
+        except Exception as e:
+            logger.error(f"Gemini Moderation error: {e}")
+            
+    return False
+
 async def generate_ai_response(history: list[dict]) -> str:
     """Multi-provider fallback logic with conversational memory"""
     # 1. Try Gemini
