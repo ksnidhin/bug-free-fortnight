@@ -113,12 +113,20 @@ async def generate_ai_response(history: list[dict], base64_image: str = None) ->
     # 2. Fallback to Groq
     if groq_client:
         try:
-            model = "llama-3.3-70b-versatile"
+            model = "qwen/qwen3.6-27b" if base64_image else "llama-3.3-70b-versatile"
             groq_messages = [{"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
-                # Strip out any images if passed, Groq currently has no vision models available
-                groq_messages.append({"role": role, "content": msg["content"]})
+                content = msg["content"]
+                
+                # Attach image to the most recent user prompt
+                if base64_image and msg == history[-1] and role == "user":
+                    content = [
+                        {"type": "text", "text": msg["content"]},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                    
+                groq_messages.append({"role": role, "content": content})
                 
             completion = await groq_client.chat.completions.create(
                 model=model,
