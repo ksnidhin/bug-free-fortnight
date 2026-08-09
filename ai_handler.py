@@ -1,3 +1,4 @@
+import base64
 import os
 import time
 import logging
@@ -70,7 +71,22 @@ async def is_disrespectful(text: str) -> bool:
             
     return False
 
-async def generate_ai_response(history: list[dict]) -> str:
+
+async def _extract_base64_image(msg) -> str | None:
+    try:
+        if msg.photo:
+            file = await msg.photo[-1].get_file()
+            byte_array = await file.download_as_bytearray()
+            return base64.b64encode(byte_array).decode('utf-8')
+        elif msg.reply_to_message and msg.reply_to_message.photo:
+            file = await msg.reply_to_message.photo[-1].get_file()
+            byte_array = await file.download_as_bytearray()
+            return base64.b64encode(byte_array).decode('utf-8')
+    except Exception:
+        pass
+    return None
+
+async def generate_ai_response(history: list[dict], base64_image: str = None) -> str:
     """Multi-provider fallback logic with conversational memory"""
     # 1. Try Gemini
     if gemini_client:
@@ -93,14 +109,23 @@ async def generate_ai_response(history: list[dict]) -> str:
     # 2. Fallback to Groq
     if groq_client:
         try:
-            # Convert history to Groq format (already matches role user/assistant mostly)
+            model = "llama-3.2-90b-vision-preview" if base64_image else "llama-3.3-70b-versatile"
             groq_messages = [{"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
-                groq_messages.append({"role": role, "content": msg["content"]})
+                content = msg["content"]
+                
+                # Attach image to the most recent user prompt
+                if base64_image and msg == history[-1] and role == "user":
+                    content = [
+                        {"type": "text", "text": msg["content"]},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                    
+                groq_messages.append({"role": role, "content": content})
                 
             completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=model,
                 messages=groq_messages,
             )
             return completion.choices[0].message.content
@@ -122,17 +147,18 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     await msg.reply_chat_action("typing")
     history = await _get_and_update_history(msg.chat_id, prompt)
-    reply = await generate_ai_response(history)
+    img = await _extract_base64_image(msg)
+    reply = await generate_ai_response(history, base64_image=img)
     await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
 
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if we should auto-reply to a question."""
     msg = update.effective_message
-    if not msg or not msg.text:
+    if not msg or not (msg.text or msg.caption):
         return
         
-    text = msg.text.strip()
+    text = msg.text.strip() if msg.text else (msg.caption.strip() if msg.caption else "")
     chat_id = msg.chat_id
     
     # Simple question heuristic
@@ -164,6 +190,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
             
         history = await _get_and_update_history(chat_id, prompt)
-        reply = await generate_ai_response(history)
+        img = await _extract_base64_image(msg)
+        reply = await generate_ai_response(history, base64_image=img)
         await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
