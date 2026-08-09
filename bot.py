@@ -47,11 +47,13 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import asyncpg
+import aiosqlite
+import sqlite3
 from dotenv import load_dotenv
 from telegram import ChatPermissions, Message, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
+from ai_handler import cmd_ai, check_auto_ai
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -72,12 +74,13 @@ LOG_CHAT_ID: int | None = (
     int(os.getenv("LOG_CHAT_ID")) if os.getenv("LOG_CHAT_ID") else None
 )
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+SQLITE_PATH = "data/bot_data.db"
 
 if not BOT_TOKEN:
     sys.exit("ERROR: BOT_TOKEN is not set. Check your .env file.")
 if not OWNER_ID:
     sys.exit("ERROR: OWNER_ID is not set. Check your .env file.")
-if not DATABASE_URL:
+if False: # if not DATABASE_URL:
     sys.exit(
         "ERROR: DATABASE_URL is not set. Check your .env file. "
         "(Railway's Postgres plugin injects this automatically.)"
@@ -204,10 +207,10 @@ def _message_contains_link(msg: Message) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Database layer (PostgreSQL via asyncpg)
+# Database layer (SQLite via aiosqlite)
 # ---------------------------------------------------------------------------
 
-db_pool: asyncpg.Pool | None = None
+db_conn: aiosqlite.Connection | None = None
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS blocked_media (
@@ -216,7 +219,7 @@ CREATE TABLE IF NOT EXISTS blocked_media (
 
 CREATE TABLE IF NOT EXISTS seen_media (
     uid TEXT PRIMARY KEY,
-    seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS whitelisted_media (
@@ -225,159 +228,152 @@ CREATE TABLE IF NOT EXISTS whitelisted_media (
 
 CREATE TABLE IF NOT EXISTS lock_meta (
     uid TEXT PRIMARY KEY REFERENCES blocked_media(uid) ON DELETE CASCADE,
-    locked_by BIGINT,
+    locked_by INTEGER,
     username TEXT,
-    locked_at TIMESTAMPTZ,
-    owner_lock BOOLEAN NOT NULL DEFAULT FALSE
+    locked_at TIMESTAMP,
+    owner_lock INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS authorized_mods (
-    user_id BIGINT PRIMARY KEY
+    user_id INTEGER PRIMARY KEY
 );
 
 CREATE TABLE IF NOT EXISTS chat_mute_settings (
-    chat_id BIGINT PRIMARY KEY,
-    enabled BOOLEAN NOT NULL DEFAULT FALSE
+    chat_id INTEGER PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS link_blacklist (
-    chat_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, user_id)
 );
 """
 
 
 async def db_connect() -> None:
-    """Open the PostgreSQL connection pool."""
-    global db_pool  # noqa: PLW0603
-    db_pool = await asyncpg.create_pool(dsn=DATABASE_URL, min_size=1, max_size=5)
-    logger.info("Connected to PostgreSQL.")
+    """Open the SQLite connection."""
+    global db_conn  # noqa: PLW0603
+    Path("data").mkdir(exist_ok=True)
+    db_conn = await aiosqlite.connect(SQLITE_PATH)
+    db_conn.row_factory = aiosqlite.Row
+    import logging
+    logging.getLogger("modbot").info("Connected to SQLite.")
 
 
 async def db_close() -> None:
-    """Close the PostgreSQL connection pool."""
-    if db_pool is not None:
-        await db_pool.close()
-        logger.info("Closed PostgreSQL connection pool.")
+    """Close the SQLite connection."""
+    if db_conn is not None:
+        await db_conn.close()
+        import logging
+        logging.getLogger("modbot").info("Closed SQLite connection.")
 
 
 async def db_init_schema() -> None:
-    """Create all tables if they don't already exist. Safe to run every
-    startup.
-    """
-    assert db_pool is not None
-    async with db_pool.acquire() as conn:
-        await conn.execute(_SCHEMA_SQL)
-    logger.info("Database schema ready.")
+    """Create all tables if they don't already exist."""
+    assert db_conn is not None
+    await db_conn.executescript(_SCHEMA_SQL)
+    await db_conn.commit()
+    import logging
+    logging.getLogger("modbot").info("Database schema ready.")
 
 
-# Individual mutation helpers — one per table operation, mirroring the old
-# _save_json_list / _save_json_dict call sites so each command handler's
-# logic is otherwise unchanged.
-
+# Individual mutation helpers
 
 async def _db_add_blocked(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO blocked_media (uid) VALUES ($1) ON CONFLICT (uid) DO NOTHING", uid
-        )
+    await db_conn.execute("INSERT OR IGNORE INTO blocked_media (uid) VALUES (?)", (uid,))
+    await db_conn.commit()
 
 
 async def _db_remove_blocked(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM blocked_media WHERE uid = $1", uid)
+    await db_conn.execute("DELETE FROM blocked_media WHERE uid = ?", (uid,))
+    await db_conn.commit()
 
 
 async def _db_add_whitelist(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO whitelisted_media (uid) VALUES ($1) ON CONFLICT (uid) DO NOTHING", uid
-        )
+    await db_conn.execute("INSERT OR IGNORE INTO whitelisted_media (uid) VALUES (?)", (uid,))
+    await db_conn.commit()
 
 
 async def _db_remove_whitelist(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM whitelisted_media WHERE uid = $1", uid)
+    await db_conn.execute("DELETE FROM whitelisted_media WHERE uid = ?", (uid,))
+    await db_conn.commit()
 
 
 async def _db_set_lock_meta(uid: str, locked_by: int, username: str | None, owner_lock: bool) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO lock_meta (uid, locked_by, username, locked_at, owner_lock)
-            VALUES ($1, $2, $3, now(), $4)
-            ON CONFLICT (uid) DO UPDATE SET
-                locked_by = EXCLUDED.locked_by,
-                username = EXCLUDED.username,
-                locked_at = EXCLUDED.locked_at,
-                owner_lock = EXCLUDED.owner_lock
-            """,
-            uid, locked_by, username, owner_lock,
-        )
+    await db_conn.execute(
+        """
+        INSERT INTO lock_meta (uid, locked_by, username, locked_at, owner_lock)
+        VALUES (?, ?, ?, datetime('now'), ?)
+        ON CONFLICT (uid) DO UPDATE SET
+            locked_by = EXCLUDED.locked_by,
+            username = EXCLUDED.username,
+            locked_at = EXCLUDED.locked_at,
+            owner_lock = EXCLUDED.owner_lock
+        """,
+        (uid, locked_by, username, 1 if owner_lock else 0),
+    )
+    await db_conn.commit()
 
 
 async def _db_remove_lock_meta(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM lock_meta WHERE uid = $1", uid)
+    await db_conn.execute("DELETE FROM lock_meta WHERE uid = ?", (uid,))
+    await db_conn.commit()
 
 
 async def _db_add_seen(uid: str) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO seen_media (uid) VALUES ($1) ON CONFLICT (uid) DO NOTHING", uid
-        )
+    await db_conn.execute("INSERT OR IGNORE INTO seen_media (uid) VALUES (?)", (uid,))
+    await db_conn.commit()
 
 
 async def _db_trim_seen(max_seen: int) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            DELETE FROM seen_media
-            WHERE uid IN (
-                SELECT uid FROM seen_media ORDER BY seen_at ASC OFFSET $1
-            )
-            """,
-            max_seen,
+    await db_conn.execute(
+        """
+        DELETE FROM seen_media
+        WHERE uid IN (
+            SELECT uid FROM seen_media ORDER BY seen_at ASC LIMIT -1 OFFSET ?
         )
+        """,
+        (max_seen,),
+    )
+    await db_conn.commit()
 
 
 async def _db_add_mod(user_id: int) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO authorized_mods (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id
-        )
+    await db_conn.execute("INSERT OR IGNORE INTO authorized_mods (user_id) VALUES (?)", (user_id,))
+    await db_conn.commit()
 
 
 async def _db_remove_mod(user_id: int) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM authorized_mods WHERE user_id = $1", user_id)
+    await db_conn.execute("DELETE FROM authorized_mods WHERE user_id = ?", (user_id,))
+    await db_conn.commit()
 
 
 async def _db_set_chat_mute(chat_id: int, enabled: bool) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO chat_mute_settings (chat_id, enabled) VALUES ($1, $2)
-            ON CONFLICT (chat_id) DO UPDATE SET enabled = EXCLUDED.enabled
-            """,
-            chat_id, enabled,
-        )
+    await db_conn.execute(
+        """
+        INSERT INTO chat_mute_settings (chat_id, enabled) VALUES (?, ?)
+        ON CONFLICT (chat_id) DO UPDATE SET enabled = EXCLUDED.enabled
+        """,
+        (chat_id, 1 if enabled else 0),
+    )
+    await db_conn.commit()
 
 
 async def _db_add_link_blacklist(chat_id: int, user_id: int) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO link_blacklist (chat_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            chat_id, user_id,
-        )
+    await db_conn.execute(
+        "INSERT OR IGNORE INTO link_blacklist (chat_id, user_id) VALUES (?, ?)",
+        (chat_id, user_id),
+    )
+    await db_conn.commit()
 
 
 async def _db_remove_link_blacklist(chat_id: int, user_id: int) -> None:
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM link_blacklist WHERE chat_id = $1 AND user_id = $2", chat_id, user_id
-        )
+    await db_conn.execute(
+        "DELETE FROM link_blacklist WHERE chat_id = ? AND user_id = ?", 
+        (chat_id, user_id)
+    )
+    await db_conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -396,37 +392,44 @@ link_blacklist: dict[str, list[str]] = {}
 async def load_all() -> None:
     """(Re)load every store from the database into memory."""
     global blocked, seen, whitelist, lock_meta, authorized_mods, chat_mute_settings, link_blacklist  # noqa: PLW0603
-    assert db_pool is not None
+    assert db_conn is not None
 
-    async with db_pool.acquire() as conn:
-        blocked = [r["uid"] for r in await conn.fetch("SELECT uid FROM blocked_media")]
-        seen = [r["uid"] for r in await conn.fetch("SELECT uid FROM seen_media ORDER BY seen_at ASC")]
-        whitelist = [r["uid"] for r in await conn.fetch("SELECT uid FROM whitelisted_media")]
+    async with db_conn.execute("SELECT uid FROM blocked_media") as cursor:
+        blocked = [r["uid"] for r in await cursor.fetchall()]
+        
+    async with db_conn.execute("SELECT uid FROM seen_media ORDER BY seen_at ASC") as cursor:
+        seen = [r["uid"] for r in await cursor.fetchall()]
+        
+    async with db_conn.execute("SELECT uid FROM whitelisted_media") as cursor:
+        whitelist = [r["uid"] for r in await cursor.fetchall()]
 
+    async with db_conn.execute("SELECT uid, locked_by, username, locked_at, owner_lock FROM lock_meta") as cursor:
         lock_meta = {
             r["uid"]: {
                 "locked_by": r["locked_by"],
                 "username": r["username"],
-                "timestamp": r["locked_at"].isoformat() if r["locked_at"] else None,
-                "owner_lock": r["owner_lock"],
+                "timestamp": r["locked_at"] if r["locked_at"] else None,
+                "owner_lock": bool(r["owner_lock"]),
             }
-            for r in await conn.fetch(
-                "SELECT uid, locked_by, username, locked_at, owner_lock FROM lock_meta"
-            )
+            for r in await cursor.fetchall()
         }
 
-        authorized_mods = [r["user_id"] for r in await conn.fetch("SELECT user_id FROM authorized_mods")]
+    async with db_conn.execute("SELECT user_id FROM authorized_mods") as cursor:
+        authorized_mods = [r["user_id"] for r in await cursor.fetchall()]
 
+    async with db_conn.execute("SELECT chat_id, enabled FROM chat_mute_settings") as cursor:
         chat_mute_settings = {
-            str(r["chat_id"]): r["enabled"]
-            for r in await conn.fetch("SELECT chat_id, enabled FROM chat_mute_settings")
+            str(r["chat_id"]): bool(r["enabled"])
+            for r in await cursor.fetchall()
         }
 
+    async with db_conn.execute("SELECT chat_id, user_id FROM link_blacklist") as cursor:
         link_blacklist = {}
-        for r in await conn.fetch("SELECT chat_id, user_id FROM link_blacklist"):
+        for r in await cursor.fetchall():
             link_blacklist.setdefault(str(r["chat_id"]), []).append(str(r["user_id"]))
 
-    logger.info(
+    import logging
+    logging.getLogger("modbot").info(
         "Loaded %d blocked, %d seen, %d whitelisted, %d lock-meta, "
         "%d authorized mods, %d chat mute settings, %d chats w/ link-blacklist",
         len(blocked),
@@ -783,13 +786,24 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     media_type, uid, fid = media
     await _record_seen(uid)
 
+    blocked_uid = uid
+    if media_type == "sticker" and getattr(msg, "sticker", None) and msg.sticker.set_name:
+        pack_uid = f"stp:{msg.sticker.set_name}"
+        if pack_uid in blocked:
+            blocked_uid = pack_uid
+
     # Skip whitelisted IDs
-    if uid in whitelist:
+    if blocked_uid in whitelist:
         return
 
     # Enforce blocklist
-    if uid not in blocked:
+    if blocked_uid not in blocked:
+        # Check AI for captions if not blocked
+        if msg.caption:
+            await check_auto_ai(update, context)
         return
+
+    uid = blocked_uid
 
     user = msg.from_user
     user_id = user.id if user else 0
@@ -885,14 +899,22 @@ async def _do_lock(
 
     uid: str | None = None
     media_type: str | None = None
+    is_stp_command = context.args and context.args[0].lower() == "stp"
 
-    if context.args:
+    if context.args and not is_stp_command:
         uid = context.args[0]
         media_type = "manual"
     elif msg.reply_to_message:
         media = _extract_media(msg.reply_to_message)
         if media:
             media_type, uid, _ = media
+            if is_stp_command:
+                if media_type == "sticker" and msg.reply_to_message.sticker and msg.reply_to_message.sticker.set_name:
+                    uid = f"stp:{msg.reply_to_message.sticker.set_name}"
+                    media_type = "sticker_pack"
+                else:
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /lock stp.")
+                    return
 
     cmd_name = "/olock" if owner_lock else "/lock"
     if uid is None:
@@ -970,13 +992,20 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     uid: str | None = None
+    is_stp_command = context.args and context.args[0].lower() == "stp"
 
-    if context.args:
+    if context.args and not is_stp_command:
         uid = context.args[0]
     elif msg.reply_to_message:
         media = _extract_media(msg.reply_to_message)
         if media:
-            _, uid, _ = media
+            media_type, uid, _ = media
+            if is_stp_command:
+                if media_type == "sticker" and msg.reply_to_message.sticker and msg.reply_to_message.sticker.set_name:
+                    uid = f"stp:{msg.reply_to_message.sticker.set_name}"
+                else:
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /unlock stp.")
+                    return
 
     if uid is None:
         await msg.reply_text(
@@ -1102,13 +1131,20 @@ async def cmd_whitelist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     uid: str | None = None
+    is_stp_command = context.args and context.args[0].lower() == "stp"
 
-    if context.args:
+    if context.args and not is_stp_command:
         uid = context.args[0]
     elif msg.reply_to_message:
         media = _extract_media(msg.reply_to_message)
         if media:
-            _, uid, _ = media
+            media_type, uid, _ = media
+            if is_stp_command:
+                if media_type == "sticker" and msg.reply_to_message.sticker and msg.reply_to_message.sticker.set_name:
+                    uid = f"stp:{msg.reply_to_message.sticker.set_name}"
+                else:
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /unlock stp.")
+                    return
 
     if uid is None:
         await msg.reply_text(
@@ -1166,13 +1202,20 @@ async def cmd_unwhitelist(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     uid: str | None = None
+    is_stp_command = context.args and context.args[0].lower() == "stp"
 
-    if context.args:
+    if context.args and not is_stp_command:
         uid = context.args[0]
     elif msg.reply_to_message:
         media = _extract_media(msg.reply_to_message)
         if media:
-            _, uid, _ = media
+            media_type, uid, _ = media
+            if is_stp_command:
+                if media_type == "sticker" and msg.reply_to_message.sticker and msg.reply_to_message.sticker.set_name:
+                    uid = f"stp:{msg.reply_to_message.sticker.set_name}"
+                else:
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /unlock stp.")
+                    return
 
     if uid is None:
         await msg.reply_text(
@@ -1472,10 +1515,24 @@ async def cmd_bl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await msg.reply_text("ℹ️ That user is already link-blacklisted in this chat.")
         return
 
+    target_is_bot = False
+    if msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == target_id:
+        target_is_bot = msg.reply_to_message.from_user.is_bot
+
     await _add_link_blacklist(chat.id, target_id)
-    await msg.reply_text(
+
+    reply_text = (
         f"🔗🚫 <code>{target_id}</code> is now link-blacklisted in this chat — "
-        f"any message they send containing a link will be auto-deleted.",
+        f"any message they send containing a link will be auto-deleted."
+    )
+    if target_is_bot:
+        reply_text += (
+            "\n\n⚠️ <i>Note: To delete links from other bots, you MUST enable "
+            "\"Bot-to-Bot Communication Mode\" for this bot via @BotFather.</i>"
+        )
+
+    await msg.reply_text(
+        reply_text,
         parse_mode=ParseMode.HTML,
     )
     await _log_event(
@@ -1636,6 +1693,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("lock", cmd_lock))
+    app.add_handler(CommandHandler("ai", cmd_ai))
     app.add_handler(CommandHandler("olock", cmd_olock))
     app.add_handler(CommandHandler("unlock", cmd_unlock))
     app.add_handler(CommandHandler("listlocks", cmd_listlocks))
