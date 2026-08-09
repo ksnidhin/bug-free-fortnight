@@ -900,7 +900,7 @@ async def _do_lock(
 
     uid: str | None = None
     media_type: str | None = None
-    is_stp_command = context.args and context.args[0].lower() == "stp"
+    is_stp_command = context.args and context.args[0].lower() in ("stp", "pack")
 
     if context.args and not is_stp_command:
         uid = context.args[0]
@@ -914,7 +914,7 @@ async def _do_lock(
                     uid = f"stp:{msg.reply_to_message.sticker.set_name}"
                     media_type = "sticker_pack"
                 else:
-                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /lock stp.")
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /lock pack.")
                     return
 
     cmd_name = "/olock" if owner_lock else "/lock"
@@ -993,7 +993,7 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     uid: str | None = None
-    is_stp_command = context.args and context.args[0].lower() == "stp"
+    is_stp_command = context.args and context.args[0].lower() in ("stp", "pack")
 
     if context.args and not is_stp_command:
         uid = context.args[0]
@@ -1005,7 +1005,7 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 if media_type == "sticker" and msg.reply_to_message.sticker and msg.reply_to_message.sticker.set_name:
                     uid = f"stp:{msg.reply_to_message.sticker.set_name}"
                 else:
-                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /unlock stp.")
+                    await msg.reply_text("⚠️ Reply to a sticker that belongs to a sticker pack to use /unlock pack.")
                     return
 
     if uid is None:
@@ -1612,7 +1612,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "",
             "<b>Moderation</b>",
             "/lock &lt;uid&gt; — block a media item (reply or pass UID)",
-            "/unlock &lt;uid&gt; — unblock a media item (blocked if owner-locked)",
+            "/lock pack — block an entire sticker pack (reply to a sticker)",
+            "/unlock &lt;uid&gt; — unblock a media item",
+            "/unlock pack — unblock an entire sticker pack",
             "/listlocks — list blocked UIDs (🔐 = owner-locked)",
             "/seen — list recently observed UIDs",
             "/whitelist &lt;uid&gt; — exempt a UID from blocking",
