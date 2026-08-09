@@ -21,14 +21,40 @@ groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 last_auto_reply = {}
 AUTO_REPLY_COOLDOWN = 60
 
-async def generate_ai_response(prompt: str) -> str:
-    """Multi-provider fallback logic"""
+# Conversational memory: chat_id -> list of message dicts
+chat_histories = {}
+MAX_HISTORY = 10
+
+async def _get_and_update_history(chat_id: int, prompt: str) -> list[dict]:
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+    
+    chat_histories[chat_id].append({"role": "user", "content": prompt})
+    
+    if len(chat_histories[chat_id]) > MAX_HISTORY:
+        chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY:]
+        
+    return chat_histories[chat_id]
+
+async def _append_ai_response(chat_id: int, response: str):
+    if chat_id in chat_histories:
+        chat_histories[chat_id].append({"role": "assistant", "content": response})
+
+
+async def generate_ai_response(history: list[dict]) -> str:
+    """Multi-provider fallback logic with conversational memory"""
     # 1. Try Gemini
     if gemini_client:
         try:
+            # Convert history to Gemini format
+            gemini_contents = []
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "model"
+                gemini_contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                
             response = await gemini_client.aio.models.generate_content(
                 model='gemini-2.5-flash', 
-                contents=prompt,
+                contents=gemini_contents,
                 config={"system_instruction": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}
             )
             return response.text
@@ -38,12 +64,15 @@ async def generate_ai_response(prompt: str) -> str:
     # 2. Fallback to Groq
     if groq_client:
         try:
+            # Convert history to Groq format (already matches role user/assistant mostly)
+            groq_messages = [{"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."}]
+            for msg in history:
+                role = "user" if msg["role"] == "user" else "assistant"
+                groq_messages.append({"role": role, "content": msg["content"]})
+                
             completion = await groq_client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": "You are a helpful and concise group chat assistant. Keep answers under 3 sentences."},
-                    {"role": "user", "content": prompt}
-                ],
+                messages=groq_messages,
             )
             return completion.choices[0].message.content
         except Exception as e:
@@ -63,7 +92,9 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     await msg.reply_chat_action("typing")
-    reply = await generate_ai_response(prompt)
+    history = await _get_and_update_history(msg.chat_id, prompt)
+    reply = await generate_ai_response(history)
+    await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
 
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,5 +134,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if context.bot.username:
             prompt = prompt.replace(f"@{context.bot.username}", "").strip()
             
-        reply = await generate_ai_response(prompt)
+        history = await _get_and_update_history(chat_id, prompt)
+        reply = await generate_ai_response(history)
+        await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
