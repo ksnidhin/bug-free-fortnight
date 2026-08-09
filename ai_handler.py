@@ -42,6 +42,48 @@ async def _append_ai_response(chat_id: int, response: str):
         chat_histories[chat_id].append({"role": "assistant", "content": response})
 
 
+
+async def enforce_moderation(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    """Check text for toxicity and mute if necessary. Returns True if muted."""
+    if not await is_disrespectful(text):
+        return False
+        
+    msg = update.effective_message
+    user = msg.from_user
+    user_id = user.id if user else 0
+    
+    try:
+        member = await msg.chat.get_member(user_id)
+        if member.status in ["administrator", "creator"]:
+            return False
+    except Exception:
+        pass
+        
+    from datetime import datetime, timedelta, timezone
+    from telegram import ChatPermissions
+    
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+        
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=msg.chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=datetime.now(timezone.utc) + timedelta(seconds=60),
+        )
+        await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text=f"🚫 {user.mention_html() if user else 'User'} has been muted for 60s for toxic/disrespectful behavior.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+        
+    return True
+
 async def is_disrespectful(text: str) -> bool:
     """Use AI to determine if a message is highly disrespectful or toxic."""
     prompt = f"Analyze the following message. Is it highly disrespectful, toxic, or directly mocking? Reply ONLY with the exact word YES or the exact word NO. Do not explain. Message: {text}"
@@ -149,6 +191,8 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     prompt = " ".join(context.args) if context.args else ""
+    if await enforce_moderation(update, context, prompt):
+        return
     if not prompt:
         await msg.reply_text("Please provide a prompt: `/ai what is 2+2?`", parse_mode="Markdown")
         return
@@ -179,6 +223,8 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id
 
     if is_mention or is_reply_to_bot or is_question:
+        if await enforce_moderation(update, context, text):
+            return
         # Check cooldown
         now = time.time()
         if chat_id in last_auto_reply and now - last_auto_reply[chat_id] < AUTO_REPLY_COOLDOWN:
