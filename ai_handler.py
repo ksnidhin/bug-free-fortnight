@@ -91,7 +91,7 @@ async def is_disrespectful(text: str) -> bool:
     if groq_client:
         try:
             completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama-3.1-8b-instant",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_completion_tokens=5,
@@ -104,7 +104,7 @@ async def is_disrespectful(text: str) -> bool:
     if gemini_client:
         try:
             response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.0-flash',
                 contents=prompt,
             )
             return "YES" in response.text.strip().upper()
@@ -316,7 +316,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
     # If tools are enabled, ONLY use Groq (Gemini doesn't have tools configured here)
     if tools and groq_client:
         try:
-            model = "llama-3.3-70b-versatile"
+            model = "llama-3.1-8b-instant"
             groq_messages = [{"role": "system", "content": system_prompt}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
@@ -366,7 +366,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
                 gemini_contents.append({"role": role, "parts": parts})
                 
             response = await gemini_client.aio.models.generate_content(
-                model='gemini-2.5-flash', 
+                model='gemini-2.0-flash', 
                 contents=gemini_contents,
                 config={"system_instruction": system_prompt}
             )
@@ -376,7 +376,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             
     if groq_client:
         try:
-            model = "qwen/qwen3.6-27b" if base64_image else "llama-3.3-70b-versatile"
+            model = "qwen/qwen3.6-27b" if base64_image else "llama-3.1-8b-instant"
             groq_messages = [{"role": "system", "content": system_prompt}]
             for msg in history:
                 role = "user" if msg["role"] == "user" else "assistant"
