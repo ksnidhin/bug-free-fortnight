@@ -193,11 +193,32 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 audio_stream = io.BytesIO(resp.content)
                 audio_stream.name = "voice.wav"
                 await msg.reply_voice(voice=audio_stream)
+                await _log_ai_usage(msg, prompt, f"[Voice Note Generated]\n{reply_text}", context)
             else:
                 raise Exception(f"API Error {resp.status_code}: {resp.text}")
     except Exception as e:
         logger.error(f"TTS error: {e}")
         await msg.reply_text(f"Voice generation failed: {e}\n\nHere is the text instead:\n{reply_text}")
+
+
+async def _log_ai_usage(msg, prompt, reply, context):
+    import os
+    from telegram.constants import ParseMode
+    log_chat_id = os.getenv("LOG_CHAT_ID")
+    if not log_chat_id:
+        return
+    try:
+        log_chat_id = int(log_chat_id)
+        user = msg.from_user
+        username = user.username or '?'
+        clean_reply = reply.replace('<', '&lt;').replace('>', '&gt;')
+        clean_prompt = prompt.replace('<', '&lt;').replace('>', '&gt;')
+        log_text = f"🤖 <b>AI Usage Log</b>\n👤 User: <code>{user.id}</code> (@{username})\n💬 Prompt: {clean_prompt}\n📝 Answer: {clean_reply}"
+        if len(log_text) > 4000:
+            log_text = log_text[:4000] + "... (truncated)"
+        await context.bot.send_message(chat_id=log_chat_id, text=log_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Failed to log AI usage: {e}")
 
 async def _extract_base64_image(msg) -> str | None:
     try:
@@ -291,6 +312,7 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply = await generate_ai_response(history, base64_image=img)
     await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
+    await _log_ai_usage(msg, prompt, reply, context)
 
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if we should auto-reply to a question."""
@@ -339,3 +361,5 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply = await generate_ai_response(history, base64_image=img)
         await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
+        await _log_ai_usage(msg, prompt, reply, context)
+    await _log_ai_usage(msg, prompt, reply, context)
