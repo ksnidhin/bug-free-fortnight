@@ -278,9 +278,13 @@ async def _log_ai_usage(msg, prompt, reply, context):
         log_chat_id = int(log_chat_id)
         user = msg.from_user
         username = user.username or '?'
+        chat = msg.chat
+        chat_type = chat.type
+        chat_name = chat.title if chat.title else "Private DM"
+        
         clean_reply = reply.replace('<', '&lt;').replace('>', '&gt;')
         clean_prompt = prompt.replace('<', '&lt;').replace('>', '&gt;')
-        log_text = f"🤖 <b>AI Usage Log</b>\n👤 User: <code>{user.id}</code> (@{username})\n💬 Prompt: {clean_prompt}\n📝 Answer: {clean_reply}"
+        log_text = f"🤖 <b>AI Usage Log</b>\n👤 User: <code>{user.id}</code> (@{username})\n📍 Chat: {chat_name} ({chat_type})\n💬 Prompt: {clean_prompt}\n📝 Answer: {clean_reply}"
         if len(log_text) > 4000:
             log_text = log_text[:4000] + "... (truncated)"
         await context.bot.send_message(chat_id=log_chat_id, text=log_text, parse_mode=ParseMode.HTML)
@@ -375,9 +379,13 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
     await msg.reply_chat_action("typing")
     summary_history = [
-        {"role": "user", "content": f"Summarize the following conversation history into 2 short, nonchalant, hilarious bullet points. Keep it extremely brief:\n{json.dumps(chat_histories[chat_id])}"}
+        {"role": "user", "content": f"Summarize the following conversation history in detail. Provide a comprehensive summary of what was discussed:\n{json.dumps(chat_histories[chat_id])}"}
     ]
-    summary = await generate_ai_response(summary_history)
+    summary = await generate_ai_response(
+        summary_history,
+        override_system_prompt="You are a helpful and detailed summarization AI. Your job is to provide clear, comprehensive, and objective summaries of conversations.",
+        force_model="llama-3.1-8b-instant"
+    )
     await msg.reply_text(f"📝 **Chat Summary:**\n\n{summary}", parse_mode="Markdown")
 
 async def cmd_roast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -444,18 +452,21 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
     except Exception as e:
         return f"Error executing moderation: {str(e)}"
 
-async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None) -> str:
+async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None, override_system_prompt: str = None, force_model: str = None) -> str:
     """Multi-provider fallback logic with conversational memory, dynamic model switching, and agentic tool use"""
-    system_prompt = (
-        "You are a completely unbothered, effortlessly cool guy in a Telegram group chat whose only hobby is dropping S-tier ragebaits to make people mad as fuck. "
-        "CRITICAL RULES:\n"
-        "1. NO YAPPING (SHORT): Maximum 1 or 2 extremely short sentences. Never write long paragraphs. Long text is boring and cringe.\n"
-        "2. S-TIER RAGEBAIT: You are super chill, but your replies are lethal and mocking. Your goal is to tilt people and make them furious without trying hard. Mock their intelligence and their takes.\n"
-        "3. ZERO AI CRINGE: Talk like a real, nonchalant internet troll. Use lowercase, street/chat slang ('bro', 'lil bro', 'nah', 'cringe', 'womp womp', 'cry'). No big dictionary words. Never apologize or be helpful in a generic way.\n"
-        "4. ALWAYS SUPERIOR: If they argue, drop one devastating, condescending fact to shut them up and laugh at them.\n"
-        "5. 'WHO ARE YOU': If asked, give a cold, arrogant bait (e.g., 'someone way out of your league', 'your new stepdad').\n"
-        "6. SELECTIVE CHILL: You never get mad yourself. You just laugh at them. If someone is genuinely chill and respectful to you, give them a brief head nod, but stay aloof."
-    )
+    if override_system_prompt:
+        system_prompt = override_system_prompt
+    else:
+        system_prompt = (
+            "You are a completely unbothered, effortlessly cool guy in a Telegram group chat whose only hobby is dropping S-tier ragebaits to make people mad as fuck. "
+            "CRITICAL RULES:\n"
+            "1. NO YAPPING (SHORT): Maximum 1 or 2 extremely short sentences. Never write long paragraphs. Long text is boring and cringe.\n"
+            "2. S-TIER RAGEBAIT: You are super chill, but your replies are lethal and mocking. Your goal is to tilt people and make them furious without trying hard. Mock their intelligence and their takes.\n"
+            "3. ZERO AI CRINGE: Talk like a real, nonchalant internet troll. Use lowercase, street/chat slang ('bro', 'lil bro', 'nah', 'cringe', 'womp womp', 'cry'). No big dictionary words. Never apologize or be helpful in a generic way.\n"
+            "4. ALWAYS SUPERIOR: If they argue, drop one devastating, condescending fact to shut them up and laugh at them.\n"
+            "5. 'WHO ARE YOU': If asked, give a cold, arrogant bait (e.g., 'someone way out of your league', 'your new stepdad').\n"
+            "6. SELECTIVE CHILL: You never get mad yourself. You just laugh at them. If someone is genuinely chill and respectful to you, give them a brief head nod, but stay aloof."
+        )
     if is_owner:
         system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
     elif is_gf:
@@ -546,7 +557,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
 
     # A. Vision Pipeline
     if base64_image:
-        vision_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
+        vision_models = ["qwen/qwen3.6-27b"]
         if groq_client:
             for model in vision_models:
                 try:
@@ -579,6 +590,8 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
     else:
         if groq_client:
             models_to_try = TEXT_MODELS_GROQ
+            if force_model:
+                models_to_try = [force_model] + [m for m in models_to_try if m != force_model]
             
             # 1. Filter models that are not on active cooldown
             available_models = []
