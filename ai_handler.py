@@ -723,7 +723,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
         is_gf = msg.from_user.id == 8887888107
         
-        # Fast local anti-jailbreak filter (0 API calls, instantaneous)
+        # Fast local anti-jailbreak and link filter (0 API calls, instantaneous)
         if not is_owner and not is_gf:
             jailbreak_keywords = [
                 r"forget.*instruction", r"ignore.*instruction", r"system\s*prompt", r"act\s*like", 
@@ -732,9 +732,21 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ]
             is_suspiciously_long = len(prompt) > 400
             has_jailbreak_keyword = any(re.search(kw, text_lower) for kw in jailbreak_keywords)
+            has_link = bool(re.search(r"http[s]?://|t\.me/|www\.", text_lower))
             
             if is_suspiciously_long or has_jailbreak_keyword:
                 roast = "nice try with the jailbreak script lil bro. maybe take a cybersecurity course before trying to hack a telegram bot 😭💀 womp womp"
+                await _append_ai_response(chat_id, roast)
+                await msg.reply_text(roast)
+                await _log_ai_usage(msg, prompt, roast, context)
+                return
+                
+            if has_link:
+                roast = "nobody clicking your scam links lil bro. take that garbage somewhere else 😭💀"
+                try:
+                    await msg.delete()
+                except:
+                    pass
                 await _append_ai_response(chat_id, roast)
                 await msg.reply_text(roast)
                 await _log_ai_usage(msg, prompt, roast, context)
