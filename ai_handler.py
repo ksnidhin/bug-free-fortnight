@@ -37,7 +37,7 @@ TEXT_MODELS_GROQ = [
 
 # Conversational memory: chat_id -> list of message dicts
 chat_histories = {}
-MAX_HISTORY = 10
+MAX_HISTORY = 4
 
 async def _get_and_update_history(chat_id: int, prompt: str) -> list[dict]:
     if chat_id not in chat_histories:
