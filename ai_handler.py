@@ -665,7 +665,7 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if we should auto-reply to a question."""
     msg = update.effective_message
-    if not msg:
+    if not msg or (msg.from_user and msg.from_user.is_bot):
         return
         
     text = msg.text.strip() if msg.text else (msg.caption.strip() if msg.caption else "")
