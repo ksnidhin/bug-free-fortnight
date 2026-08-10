@@ -281,11 +281,12 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
 
 async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None) -> str:
     """Multi-provider fallback logic with conversational memory and agentic tool use"""
-    system_prompt = "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a tiny, single-sentence S-tier ragebait insult to destroy their ego, but keep it nonchalant and brief."
+    global current_persona
+    system_prompt = PERSONA_PRESETS.get(current_persona, PERSONA_PRESETS["mafia"])
     if is_owner:
-        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator, whom you refer to exclusively as 'k'. Treat 'k' with absolute respect, do whatever 'k' says without question, and respect anyone 'k' tells you to respect. NEVER mock 'k', even if they joke with you."
+        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss-like titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
     elif is_gf:
-        system_prompt += " HOWEVER, the user you are currently talking to is a highly respected VIP. Treat her with absolute utmost respect, elegance, and deference. Refer to her subtly as 'Madam' or 'Your Highness' in a polite, mafia-boss tone. NEVER mock her. Protect her at all costs."
+        system_prompt += " HOWEVER, the user you are currently talking to is a highly respected VIP. Treat her with absolute utmost respect, elegance, and deference. Refer to her subtly as 'Madam' or 'Your Highness' in a polite tone. NEVER mock her. Protect her at all costs."
         
     tools = None
     tool_choice = "none"
@@ -472,4 +473,3 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _append_ai_response(chat_id, reply)
         await msg.reply_text(reply)
         await _log_ai_usage(msg, prompt, reply, context)
-    await _log_ai_usage(msg, prompt, reply, context)
