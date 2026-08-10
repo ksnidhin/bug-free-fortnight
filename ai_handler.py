@@ -20,7 +20,7 @@ groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # Cooldown tracking: chat_id -> timestamp
 last_auto_reply = {}
-AUTO_REPLY_COOLDOWN = 60
+AUTO_REPLY_COOLDOWN = 3
 
 PERSONA_PRESETS = {
     "mafia": "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a tiny, single-sentence S-tier ragebait insult to destroy their ego, but keep it nonchalant and brief.",
@@ -270,6 +270,35 @@ async def _extract_base64_image(msg) -> str | None:
     return None
 
 
+
+def _clean_ai_output(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<?function=\w+>.*?(?:</function>|\n|$)', '', text, flags=re.DOTALL)
+    text = re.sub(r'\[TOOL_CALLS\].*?$', '', text, flags=re.DOTALL)
+    return text.strip()
+
+async def _check_and_execute_raw_tool_call(content: str, update, context) -> str:
+    if not content:
+        return ""
+    import json
+    match = re.search(r'<?function=(\w+)>(.*?)(?:</function>|\n|$)', content, flags=re.DOTALL)
+    if match:
+        func_name = match.group(1)
+        json_args_str = match.group(2).strip()
+        try:
+            args = json.loads(json_args_str)
+            if func_name == "moderate_user" and update and context:
+                tool_res = await execute_moderation_tool(update, context, args.get("action"), args.get("duration_minutes", 0))
+                clean_text = _clean_ai_output(content)
+                if clean_text:
+                    return clean_text
+                return tool_res
+        except Exception as e:
+            logger.error(f"Error executing raw tool call: {e}")
+    return _clean_ai_output(content)
+
 async def execute_moderation_tool(update, context, action: str, duration_minutes: int):
     from telegram import ChatPermissions
     from datetime import timedelta
@@ -387,9 +416,9 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
                     model=model,
                     messages=groq_messages
                 )
-                return final_completion.choices[0].message.content
+                return _clean_ai_output(final_completion.choices[0].message.content)
                 
-            return message.content
+            return await _check_and_execute_raw_tool_call(message.content or "", update, context)
         except Exception as e:
             logger.error(f"Groq API tool error: {e}")
 
@@ -414,8 +443,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
             )
             raw_content = completion.choices[0].message.content
             import re
-            content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
-            return content
+            return _clean_ai_output(raw_content)
         except Exception as e:
             logger.error(f"Groq API primary error: {e}")
             try:
@@ -468,8 +496,13 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     text = msg.text.strip() if msg.text else (msg.caption.strip() if msg.caption else "")
     chat_id = msg.chat_id
     
-    # Simple question heuristic
-    is_question = text.endswith("?") and len(text) > 5 and any(w in text.lower() for w in ["how", "what", "why", "when", "where", "who", "is", "can", "do", "does"])
+    text_lower = text.lower()
+    question_words = [
+        "how", "what", "why", "when", "where", "who", "which", "whose", "whom",
+        "is ", "can ", "could ", "would ", "should ", "does ", "do ", "has ", "have ",
+        "anyone", "anybody", "wth", "wtf", "pls", "please", "tell me"
+    ]
+    is_question = text.endswith("?") or any(w in text_lower for w in question_words)
     
     # Mention heuristic
     is_mention = context.bot.username and f"@{context.bot.username}" in text
@@ -478,16 +511,12 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id
 
     if is_mention or is_reply_to_bot or is_question:
-        # Check cooldown
         now = time.time()
         if chat_id in last_auto_reply and now - last_auto_reply[chat_id] < AUTO_REPLY_COOLDOWN:
-            # Don't auto-reply to random questions if on cooldown.
-            # But if we are explicitly mentioned or replied to, we bypass cooldown!
             if not (is_mention or is_reply_to_bot):
                 return
                 
-        if not (is_mention or is_reply_to_bot):
-            last_auto_reply[chat_id] = now
+        last_auto_reply[chat_id] = now
             
         await msg.reply_chat_action("typing")
         
