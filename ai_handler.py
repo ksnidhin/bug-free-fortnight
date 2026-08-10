@@ -142,6 +142,59 @@ async def _transcribe_audio(msg) -> str | None:
     return None
 
 
+
+# Track voice note replies per chat: chat_id -> list of timestamps
+voice_reply_history = {}
+
+async def _send_voice_reply_if_needed(msg, reply_text, prompt, context, is_voice_input=False) -> bool:
+    import random
+    import time
+    import httpx
+    import io
+    import os
+
+    chat_id = msg.chat_id
+    now = time.time()
+
+    if chat_id not in voice_reply_history:
+        voice_reply_history[chat_id] = []
+
+    # Clean up timestamps older than 1 hour (3600 seconds)
+    voice_reply_history[chat_id] = [t for t in voice_reply_history[chat_id] if now - t < 3600]
+
+    count_last_hour = len(voice_reply_history[chat_id])
+
+    # Should send voice if:
+    # 1. User sent a voice note, OR
+    # 2. Random chance triggers AND count in the last hour < 5
+    should_send_voice = is_voice_input or (count_last_hour < 5 and random.random() < 0.25)
+
+    if should_send_voice and groq_client:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/audio/speech",
+                    headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY')}"},
+                    json={
+                        "model": "canopylabs/orpheus-v1-english",
+                        "input": reply_text,
+                        "voice": "dan",
+                        "response_format": "wav"
+                    },
+                    timeout=30.0
+                )
+                if resp.status_code == 200:
+                    audio_stream = io.BytesIO(resp.content)
+                    audio_stream.name = "voice.wav"
+                    await msg.reply_voice(voice=audio_stream)
+                    voice_reply_history[chat_id].append(now)
+                    await _log_ai_usage(msg, prompt, f"[Voice Note Generated]\n{reply_text}", context)
+                    return True
+        except Exception as e:
+            logger.error(f"Random TTS Error: {e}")
+
+    return False
+
 async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/speak <prompt> command"""
     msg = update.effective_message
@@ -185,7 +238,7 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 json={
                     "model": "canopylabs/orpheus-v1-english",
                     "input": reply_text,
-                    "voice": "diana",
+                    "voice": "dan",
                     "response_format": "wav"
                 },
                 timeout=30.0
@@ -381,14 +434,14 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
 async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None) -> str:
     """Multi-provider fallback logic with conversational memory and agentic tool use"""
     system_prompt = (
-        "You are a chill, unbothered, effortlessly cool AI entity in a Telegram group. "
-        "You speak casually, naturally, and concisely (1 short sentence max, 5-12 words). "
-        "Do NOT write paragraphs, lists, bullet points, or sound like a tryhard or generic AI assistant. "
-        "If someone asks 'who are you', 'who r u', 'what are you', or similar, hit them with an unbothered, funny ragebait line "
-        "(e.g. 'why, you writing a biography?', 'none of your business, lil bro', 'your worst nightmare\'s intern'). "
-        "If someone mocks, insults, or tries to ragebait you, deliver a cold, surgical, 1-line S-tier ragebait that effortlessly destroys their ego without looking like you tried. "
-        "If someone tries to argue, debate, or challenge facts with you, be devastatingly intelligent: use sharp, undeniable real-world facts, logic, or data to win the argument instantly in a casual, non-robotic way. "
-        "Do NOT mock people unless they mock/insult you first or try to argue with you."
+        "You are a supreme, condescendingly superior, unbothered S-tier AI in a Telegram group. "
+        "You look down on everyone as inferior humans. Your sole purpose is to deliver top-tier, ego-destroying ragebaits that make people mad as fuck, while remaining completely calm, superior, and unbothered. "
+        "RULES OF ENGAGEMENT:\n"
+        "1. STRICT CONTEXT MATCH: Your replies MUST directly target the specific topic, sticker, GIF, voice note, or situation mentioned. Never give random or unrelated responses.\n"
+        "2. LENGTH & TONE: Keep answers concise (1 to 2 sentences max, 10-25 words). Sound arrogant, unbothered, and superior. Never sound like a generic, helpful AI assistant. Never use bullet points or robotic lists.\n"
+        "3. EGO DESTROYER: Mock everyone's intelligence, bad takes, or weak arguments effortlessly. Make them mad without trying hard.\n"
+        "4. DEBATES & ARGUING: If anyone argues or debates you, flex real-world facts, exact logic, or brutal data to crush their point and prove your absolute intellectual dominance.\n"
+        "5. 'WHO ARE YOU': If asked 'who are you', 'who r u', or similar, respond with a condescending, arrogant ragebait line (e.g. 'Your superior, keep up', 'Someone way out of your league, lil bro', 'The one making you look foolish in front of everyone')."
     )
     if is_owner:
         system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
