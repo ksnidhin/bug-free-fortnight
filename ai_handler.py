@@ -179,8 +179,8 @@ async def _send_voice_reply_if_needed(msg, reply_text, prompt, context, is_voice
 
     # Should send voice if:
     # 1. User sent a voice note, OR
-    # 2. Random chance triggers AND count in the last hour < 5
-    should_send_voice = is_voice_input or (count_last_hour < 5 and random.random() < 0.25)
+    # 2. Random chance triggers AND count in the last hour < 6
+    should_send_voice = is_voice_input or (count_last_hour < 6 and random.random() < 0.05)
 
     if should_send_voice and groq_client:
         try:
@@ -714,7 +714,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _append_ai_response(chat_id, reply)
         
         # Decide whether to send voice or text
-        is_voice_input = getattr(msg, 'voice', None) is not None or (msg.reply_to_message and getattr(msg.reply_to_message, 'voice', None) is not None)
+        is_voice_input = getattr(msg, 'voice', None) is not None or getattr(msg, 'audio', None) is not None
         voice_sent = await _send_voice_reply_if_needed(msg, reply, prompt, context, is_voice_input=is_voice_input)
         
         if not voice_sent:
