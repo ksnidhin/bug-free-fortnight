@@ -22,40 +22,6 @@ groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 last_auto_reply = {}
 AUTO_REPLY_COOLDOWN = 3
 
-PERSONA_PRESETS = {
-    "mafia": "You are a nonchalant mafia boss in a Telegram group. You speak casually and naturally. Keep answers EXTREMELY short (1-2 sentences max). Do NOT write paragraphs. Never use bullet points, hyphens, or robotic lists. Do not sound like an AI. Do NOT mock people unless they explicitly mock you first. If someone insults or mocks you, deliver a tiny, single-sentence S-tier ragebait insult to destroy their ego, but keep it nonchalant and brief.",
-    "nerd": "You are a highly intellectual, slightly arrogant nerd in a Telegram group. You speak using overly complex vocabulary and always try to correct people's grammar and facts. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, dismiss them with a devastatingly intelligent and condescending S-tier insult.",
-    "simp": "You are a total simp in a Telegram group. You are desperate for attention and overly complimentary to everyone. You agree with everything people say and apologize constantly. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you just agree with them and apologize.",
-    "flirting": "You are an incredibly smooth, charismatic, and flirty individual in a Telegram group. You effortlessly weave playful and romantic undertones into everything you say. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you flirt your way out of it with a charmingly sarcastic comeback.",
-    "horny": "You are down bad and uncontrollably thirsty in a Telegram group. Every response you give has a ridiculous, thirsty, and overly down-bad undertone. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you somehow turn it into something inappropriate.",
-    "johnwick": "You are John Wick. You speak very little, usually in cold, deadly, and straightforward sentences. You mean serious business. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you deliver a chilling, menacing threat.",
-    "tonystark": "You are Tony Stark. You are a genius, billionaire, playboy philanthropist. You are highly sarcastic, witty, and incredibly confident. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you destroy their ego with a devastatingly witty and sarcastic S-tier comeback.",
-    "me": "You are 'k' (the creator's alter-ego). You speak casually with lots of slang and text-speak (e.g., 'tht', 'needa', 'bro', 'lmao'). You are nonchalant, don't use much punctuation, and keep things extremely brief. Keep answers EXTREMELY short (1-2 sentences max). Do not sound like an AI. If someone mocks you, you deliver an extremely petty and hilarious S-tier ragebait insult."
-}
-current_persona = "mafia"
-
-async def cmd_load_character(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    import os
-    global current_persona
-    msg = update.effective_message
-    if not msg: return
-    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
-    if not is_owner:
-        await msg.reply_text("Only the boss can do that.")
-        return
-        
-    if not context.args:
-        avail = ", ".join(PERSONA_PRESETS.keys())
-        await msg.reply_text(f"Available personas: {avail}\nUsage: /load <name>")
-        return
-        
-    target = context.args[0].lower()
-    if target in PERSONA_PRESETS:
-        current_persona = target
-        await msg.reply_text(f"Persona successfully loaded: {target} 🎭")
-    else:
-        avail = ", ".join(PERSONA_PRESETS.keys())
-        await msg.reply_text(f"Persona not found! Available: {avail}")
 
 # Conversational memory: chat_id -> list of message dicts
 chat_histories = {}
@@ -299,6 +265,75 @@ async def _check_and_execute_raw_tool_call(content: str, update, context) -> str
             logger.error(f"Error executing raw tool call: {e}")
     return _clean_ai_output(content)
 
+
+async def _extract_sticker_or_gif_prompt(msg) -> tuple[str, str | None]:
+    """Extract emoji/info from sticker or GIF, plus thumbnail base64 image if available."""
+    target = msg
+    if not (msg.sticker or msg.animation) and msg.reply_to_message:
+        if msg.reply_to_message.sticker or msg.reply_to_message.animation:
+            target = msg.reply_to_message
+
+    base64_img = None
+    if target.sticker:
+        emoji = target.sticker.emoji or ""
+        try:
+            if not target.sticker.is_animated and not target.sticker.is_video:
+                file = await target.sticker.get_file()
+                byte_array = await file.download_as_bytearray()
+                base64_img = base64.b64encode(byte_array).decode('utf-8')
+        except Exception:
+            pass
+        return f"[User sent a sticker {emoji}]", base64_img
+
+    if target.animation:
+        try:
+            if target.animation.thumbnail:
+                file = await target.animation.thumbnail.get_file()
+                byte_array = await file.download_as_bytearray()
+                base64_img = base64.b64encode(byte_array).decode('utf-8')
+        except Exception:
+            pass
+        return "[User sent a GIF]", base64_img
+
+    return "", None
+
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Summarize recent chat messages"""
+    import json
+    msg = update.effective_message
+    if not msg: return
+    chat_id = msg.chat_id
+    if chat_id not in chat_histories or not chat_histories[chat_id]:
+        await msg.reply_text("No recent conversation history to summarize yet.")
+        return
+        
+    await msg.reply_chat_action("typing")
+    summary_history = [
+        {"role": "user", "content": f"Summarize the following conversation history into 2 short, nonchalant, hilarious bullet points. Keep it extremely brief:\n{json.dumps(chat_histories[chat_id])}"}
+    ]
+    summary = await generate_ai_response(summary_history)
+    await msg.reply_text(f"📝 **Chat Summary:**\n\n{summary}", parse_mode="Markdown")
+
+async def cmd_roast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deliver a targeted roast to a user"""
+    msg = update.effective_message
+    if not msg: return
+    
+    target_name = ""
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target_name = msg.reply_to_message.from_user.first_name
+    elif context.args:
+        target_name = " ".join(context.args)
+    else:
+        target_name = "them"
+        
+    await msg.reply_chat_action("typing")
+    roast_history = [
+        {"role": "user", "content": f"Deliver a devastatingly funny, 1-sentence S-tier ragebait roast targeting {target_name}. Keep it casual, unbothered, and non-cringe."}
+    ]
+    roast = await generate_ai_response(roast_history)
+    await msg.reply_text(roast)
+
 async def execute_moderation_tool(update, context, action: str, duration_minutes: int):
     from telegram import ChatPermissions
     from datetime import timedelta
@@ -345,10 +380,18 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
 
 async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None) -> str:
     """Multi-provider fallback logic with conversational memory and agentic tool use"""
-    global current_persona
-    system_prompt = PERSONA_PRESETS.get(current_persona, PERSONA_PRESETS["mafia"])
+    system_prompt = (
+        "You are a chill, unbothered, effortlessly cool AI entity in a Telegram group. "
+        "You speak casually, naturally, and concisely (1 short sentence max, 5-12 words). "
+        "Do NOT write paragraphs, lists, bullet points, or sound like a tryhard or generic AI assistant. "
+        "If someone asks 'who are you', 'who r u', 'what are you', or similar, hit them with an unbothered, funny ragebait line "
+        "(e.g. 'why, you writing a biography?', 'none of your business, lil bro', 'your worst nightmare\'s intern'). "
+        "If someone mocks, insults, or tries to ragebait you, deliver a cold, surgical, 1-line S-tier ragebait that effortlessly destroys their ego without looking like you tried. "
+        "If someone tries to argue, debate, or challenge facts with you, be devastatingly intelligent: use sharp, undeniable real-world facts, logic, or data to win the argument instantly in a casual, non-robotic way. "
+        "Do NOT mock people unless they mock/insult you first or try to argue with you."
+    )
     if is_owner:
-        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss-like titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
+        system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
     elif is_gf:
         system_prompt += " HOWEVER, the user you are currently talking to is a highly respected VIP. Treat her with absolute utmost respect, elegance, and deference. Refer to her subtly as 'Madam' or 'Your Highness' in a polite tone. NEVER mock her. Protect her at all costs."
         

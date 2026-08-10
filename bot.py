@@ -54,7 +54,7 @@ from dotenv import load_dotenv
 from telegram import ChatPermissions, Message, Update
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
-from ai_handler import cmd_ai, check_auto_ai, cmd_speak, cmd_load_character
+from ai_handler import cmd_ai, check_auto_ai, cmd_speak, cmd_summary, cmd_roast
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -800,8 +800,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Enforce blocklist
     if blocked_uid not in blocked:
         # Check AI for captions if not blocked
-        if msg.caption:
-            await check_auto_ai(update, context)
+        await check_auto_ai(update, context)
         return
 
     uid = blocked_uid
@@ -1873,7 +1872,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("lock", cmd_lock))
     app.add_handler(CommandHandler("ai", cmd_ai))
     app.add_handler(CommandHandler("speak", cmd_speak))
-    app.add_handler(CommandHandler("load", cmd_load_character))
+    app.add_handler(CommandHandler("summary", cmd_summary))
+    app.add_handler(CommandHandler("roast", cmd_roast))
 
     app.add_handler(CommandHandler("olock", cmd_olock))
     app.add_handler(CommandHandler("unlock", cmd_unlock))
