@@ -444,7 +444,7 @@ async def execute_moderation_tool(update, context, action: str, duration_minutes
         return f"Error executing moderation: {str(e)}"
 
 async def generate_ai_response(history: list[dict], base64_image: str = None, is_owner: bool = False, is_gf: bool = False, update=None, context=None) -> str:
-    """Multi-provider fallback logic with conversational memory and agentic tool use"""
+    """Multi-provider fallback logic with conversational memory, dynamic model switching, and agentic tool use"""
     system_prompt = (
         "You are a supreme, unbothered S-tier AI in a Telegram group chat. "
         "Your main goal is to deliver sharp, hilarious, ego-destroying ragebaits that make people mad as fuck, while you remain completely calm, cool, and superior. "
@@ -490,7 +490,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
         ]
         tool_choice = "auto"
         
-    # If tools are enabled, ONLY use Groq (Gemini doesn't have tools configured here)
+    # Function calling tool execution (Groq)
     if tools and groq_client:
         try:
             model = "llama-3.1-8b-instant"
@@ -531,46 +531,103 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
         except Exception as e:
             logger.error(f"Groq API tool error: {e}")
 
-    # Standard Fallback logic (No tools)
-    if groq_client:
-        try:
-            model = "qwen/qwen3.6-27b" if base64_image else "llama-3.1-8b-instant"
-            groq_messages = [{"role": "system", "content": system_prompt}]
-            for msg in history:
-                role = "user" if msg["role"] == "user" else "assistant"
-                content = msg["content"]
-                if base64_image and msg == history[-1] and role == "user":
-                    content = [
-                        {"type": "text", "text": msg["content"]},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                groq_messages.append({"role": role, "content": content})
-                
-            completion = await groq_client.chat.completions.create(
-                model=model,
-                messages=groq_messages,
-            )
-            raw_content = completion.choices[0].message.content
-            import re
-            return _clean_ai_output(raw_content)
-        except Exception as e:
-            logger.error(f"Groq API primary error: {e}")
-            try:
-                # Backup model on Groq
-                model_backup = "llama-3.3-70b-versatile"
-                completion = await groq_client.chat.completions.create(
-                    model=model_backup,
-                    messages=groq_messages,
-                )
-                raw_content = completion.choices[0].message.content
-                import re
-                content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
-                return content
-            except Exception as e2:
-                logger.error(f"Groq API backup error: {e2}")
+    # Standard Generation Flow
+    now = time.time()
+    groq_messages = [{"role": "system", "content": system_prompt}]
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "assistant"
+        msg_content = msg["content"]
+        if base64_image and msg == history[-1] and role == "user":
+            msg_content = [
+                {"type": "text", "text": msg["content"]},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]
+        groq_messages.append({"role": role, "content": msg_content})
 
+    # A. Vision Pipeline
+    if base64_image:
+        vision_models = ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"]
+        if groq_client:
+            for model in vision_models:
+                try:
+                    completion = await groq_client.chat.completions.create(
+                        model=model,
+                        messages=groq_messages,
+                    )
+                    return _clean_ai_output(completion.choices[0].message.content)
+                except Exception as e:
+                    logger.error(f"Groq vision model {model} error: {e}")
+
+        if gemini_client:
+            try:
+                import io
+                from google.genai import types
+                image_bytes = base64.b64decode(base64_image)
+                image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+                prompt_text = f"{system_prompt}\n\nUser: {history[-1]['content'] if history else ''}"
+                
+                response = await gemini_client.aio.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=[prompt_text, image_part],
+                )
+                if response and response.text:
+                    return _clean_ai_output(response.text)
+            except Exception as e:
+                logger.error(f"Gemini vision error: {e}")
+
+    # B. Text Pipeline (Dynamic Model Switching with 30s Auto-Cooldown & Emergency Retry)
+    else:
+        if groq_client:
+            models_to_try = [
+                "llama-3.3-70b-versatile",  # Best 70B model
+                "llama-3.1-8b-instant",     # Second best (Fast & high limit)
+                "llama3-70b-8192",          # Backup 70B
+                "llama3-8b-8192"           # Backup 8B
+            ]
             
+            # 1. Filter models that are not on active cooldown
+            available_models = []
+            for m in models_to_try:
+                if m in model_cooldowns:
+                    if now < model_cooldowns[m]:
+                        continue
+                    else:
+                        del model_cooldowns[m]
+                available_models.append(m)
+
+            # If ALL models hit cooldown, reset cooldowns & try best models anyway!
+            if not available_models:
+                logger.warning("All Groq models hit cooldown. Resetting cooldown tracker for emergency retry!")
+                model_cooldowns.clear()
+                available_models = models_to_try
+
+            # Try models in order
+            for model in available_models:
+                try:
+                    completion = await groq_client.chat.completions.create(
+                        model=model,
+                        messages=groq_messages,
+                    )
+                    return _clean_ai_output(completion.choices[0].message.content)
+                except Exception as e:
+                    logger.warning(f"Groq Model {model} failed ({e}). Cooling down for 30s & trying next best model...")
+                    model_cooldowns[model] = now + 30  # 30-second quick cooldown
+
+        # Gemini Fallback if all Groq models fail
+        if gemini_client:
+            try:
+                prompt_text = f"{system_prompt}\n\nUser: {history[-1]['content'] if history else ''}"
+                response = await gemini_client.aio.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=prompt_text,
+                )
+                if response and response.text:
+                    return _clean_ai_output(response.text)
+            except Exception as e:
+                logger.error(f"Gemini fallback error: {e}")
+
     return "⚠️ I'm sorry, all AI providers are currently unavailable or experiencing rate limits."
+
 
 
 async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
