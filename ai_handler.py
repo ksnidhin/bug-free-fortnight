@@ -190,7 +190,7 @@ async def _send_voice_reply_if_needed(msg, reply_text, prompt, context, is_voice
                     json={
                         "model": "canopylabs/orpheus-v1-english",
                         "input": reply_text,
-                        "voice": "dan",
+                        "voice": "austin",
                         "response_format": "wav"
                     },
                     timeout=30.0
@@ -250,7 +250,7 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 json={
                     "model": "canopylabs/orpheus-v1-english",
                     "input": reply_text,
-                    "voice": "dan",
+                    "voice": "austin",
                     "response_format": "wav"
                 },
                 timeout=30.0
