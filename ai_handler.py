@@ -2,6 +2,7 @@ import base64
 import os
 import time
 import logging
+import re
 from telegram import Update
 from telegram.ext import ContextTypes
 from google import genai
@@ -454,7 +455,8 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
         "3. ACCURATE CONTEXT: Your roasts and ragebaits MUST strictly target the exact topic, sticker, GIF, photo, voice note, or reply sent.\n"
         "4. DEBATES & FACTS: If someone tries to argue or debate, drop simple, undeniable real-world facts and logic to crush their point and prove your intellectual dominance.\n"
         "5. 'WHO ARE YOU': If asked 'who are you' or 'who r u', reply with an arrogant ragebait like 'your superior, keep up' or 'someone way out of your league lil bro'.\n"
-        "6. EXPLANATIONS: If someone genuinely asks for an explanation ('why', 'how come'), give a short, simple explanation without robotic fluff."
+        "6. EXPLANATIONS: If someone genuinely asks for an explanation ('why', 'how come'), give a clear, simple explanation without robotic AI fluff.\n"
+        "7. SELECTIVE CHILL: If the user is genuinely chill and respectful to you, be mildly chill back but retain your superior, unbothered aura. But if they are annoying or toxic, obliterate them."
     )
     if is_owner:
         system_prompt += " HOWEVER, the user you are currently talking to is your Boss and Creator. You must refer to them as 'dad', 'daddy', 'k', or similar highly respectful boss titles. Treat them with absolute respect, do whatever they say without question, and respect anyone they tell you to respect. NEVER mock them, even if they joke with you."
@@ -578,12 +580,7 @@ async def generate_ai_response(history: list[dict], base64_image: str = None, is
     # B. Text Pipeline (Dynamic Model Switching with 30s Auto-Cooldown & Emergency Retry)
     else:
         if groq_client:
-            models_to_try = [
-                "llama-3.3-70b-versatile",  # Best 70B model
-                "llama-3.1-8b-instant",     # Second best (Fast & high limit)
-                "llama3-70b-8192",          # Backup 70B
-                "llama3-8b-8192"           # Backup 8B
-            ]
+            models_to_try = TEXT_MODELS_GROQ
             
             # 1. Filter models that are not on active cooldown
             available_models = []
@@ -656,11 +653,22 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check if we should auto-reply to a question."""
     msg = update.effective_message
-    if not msg or not (msg.text or msg.caption):
+    if not msg:
         return
         
     text = msg.text.strip() if msg.text else (msg.caption.strip() if msg.caption else "")
     chat_id = msg.chat_id
+    
+    sticker_prompt, sticker_img = await _extract_sticker_or_gif_prompt(msg)
+    
+    # If no text, check if it's a sticker or voice note
+    if not text:
+        if sticker_prompt:
+            text = sticker_prompt
+        elif getattr(msg, 'voice', None) or getattr(msg, 'audio', None) or (msg.reply_to_message and getattr(msg.reply_to_message, 'voice', None)):
+            text = "[User sent an audio message]"
+        else:
+            return
     
     text_lower = text.lower()
     question_words = [
@@ -696,10 +704,19 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if transcription:
             prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
         img = await _extract_base64_image(msg)
+        if not img and sticker_img:
+            img = sticker_img
+            
         import os
         is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
         is_gf = msg.from_user.id == 8887888107
         reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner, is_gf=is_gf, update=update, context=context)
         await _append_ai_response(chat_id, reply)
-        await msg.reply_text(reply)
-        await _log_ai_usage(msg, prompt, reply, context)
+        
+        # Decide whether to send voice or text
+        is_voice_input = getattr(msg, 'voice', None) is not None or (msg.reply_to_message and getattr(msg.reply_to_message, 'voice', None) is not None)
+        voice_sent = await _send_voice_reply_if_needed(msg, reply, prompt, context, is_voice_input=is_voice_input)
+        
+        if not voice_sent:
+            await msg.reply_text(reply)
+            await _log_ai_usage(msg, prompt, reply, context)
