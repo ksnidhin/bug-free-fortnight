@@ -284,7 +284,8 @@ async def _log_ai_usage(msg, prompt, reply, context):
         
         clean_reply = reply.replace('<', '&lt;').replace('>', '&gt;')
         clean_prompt = prompt.replace('<', '&lt;').replace('>', '&gt;')
-        log_text = f"🤖 <b>AI Usage Log</b>\n👤 User: <code>{user.id}</code> (@{username})\n📍 Chat: {chat_name} ({chat_type})\n💬 Prompt: {clean_prompt}\n📝 Answer: {clean_reply}"
+        msg_link_html = f"<a href='{msg.link}'>Jump to Message</a>" if msg.link else "Private/No Link"
+        log_text = f"🤖 <b>AI Usage Log</b>\n👤 User: <code>{user.id}</code> (@{username})\n📍 Chat: {chat_name} ({chat_type})\n🔗 Link: {msg_link_html}\n💬 Prompt: {clean_prompt}\n📝 Answer: {clean_reply}"
         if len(log_text) > 4000:
             log_text = log_text[:4000] + "... (truncated)"
         await context.bot.send_message(chat_id=log_chat_id, text=log_text, parse_mode=ParseMode.HTML)
@@ -696,7 +697,7 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Reply heuristic
     is_reply_to_bot = msg.reply_to_message and msg.reply_to_message.from_user and msg.reply_to_message.from_user.id == context.bot.id
 
-    if is_mention or is_reply_to_bot or is_question:
+    if is_mention or is_reply_to_bot or is_question or msg.chat.type == 'private':
         now = time.time()
         if chat_id in last_auto_reply and now - last_auto_reply[chat_id] < AUTO_REPLY_COOLDOWN:
             if not (is_mention or is_reply_to_bot):
