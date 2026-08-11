@@ -51,7 +51,7 @@ from typing import Any
 import aiosqlite
 import sqlite3
 from dotenv import load_dotenv
-from telegram import ChatPermissions, Message, Update
+from telegram import ChatPermissions, Message, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from ai_handler import cmd_ai, check_auto_ai, cmd_speak, cmd_summary, cmd_roast
@@ -61,6 +61,7 @@ from telegram.ext import (
     ContextTypes,
     MessageHandler,
     TypeHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -324,8 +325,12 @@ CREATE TABLE IF NOT EXISTS ban_queue (
     user_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, user_id)
 );
-"""
 
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    start_banner_file_id TEXT
+);
+"""
 
 async def db_connect() -> None:
     """Open the SQLite connection."""
@@ -482,9 +487,11 @@ chat_mute_settings: dict[str, bool] = {}
 link_blacklist: dict[str, list[str]] = {}
 
 
+start_banner_file_id: str | None = None
+
 async def load_all() -> None:
     """(Re)load every store from the database into memory."""
-    global blocked, seen, whitelist, lock_meta, authorized_mods, chat_mute_settings, link_blacklist  # noqa: PLW0603
+    global blocked, seen, whitelist, lock_meta, authorized_mods, chat_mute_settings, link_blacklist, start_banner_file_id  # noqa: PLW0603
     assert db_conn is not None
 
     async with db_conn.execute("SELECT uid FROM blocked_media") as cursor:
@@ -528,6 +535,11 @@ async def load_all() -> None:
     async with db_conn.execute("SELECT is_global_grounded FROM ai_global_settings WHERE id = 1") as cursor:
         row = await cursor.fetchone()
         ai_handler.global_grounded = bool(row["is_global_grounded"]) if row else False
+
+    async with db_conn.execute("SELECT start_banner_file_id FROM bot_settings WHERE id = 1") as cursor:
+        row = await cursor.fetchone()
+        global start_banner_file_id
+        start_banner_file_id = row["start_banner_file_id"] if row else None
 
     import logging
     logging.getLogger("modbot").info(
@@ -1941,14 +1953,174 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start — basic greeting / sanity check."""
+async def _db_set_start_banner(file_id: str | None) -> None:
+    if file_id is None:
+        await db_conn.execute("INSERT INTO bot_settings (id, start_banner_file_id) VALUES (1, NULL) ON CONFLICT(id) DO UPDATE SET start_banner_file_id=NULL")
+    else:
+        await db_conn.execute("INSERT INTO bot_settings (id, start_banner_file_id) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET start_banner_file_id=EXCLUDED.start_banner_file_id", (file_id,))
+    await db_conn.commit()
+
+async def cmd_setbanner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/setbanner - sets the GIF/image for the start menu (reply to media)"""
     msg = update.effective_message
-    if msg is None:
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
         return
-    await msg.reply_text(
-        "👋 Media moderation bot is running. Use /help to see available commands."
+        
+    if not msg.reply_to_message:
+        await msg.reply_text("Please reply to an image or GIF with /setbanner")
+        return
+        
+    media_msg = msg.reply_to_message
+    file_id = None
+    if media_msg.animation:
+        file_id = media_msg.animation.file_id
+    elif media_msg.photo:
+        file_id = media_msg.photo[-1].file_id
+    elif media_msg.document and media_msg.document.mime_type.startswith("image/"):
+        file_id = media_msg.document.file_id
+        
+    if not file_id:
+        await msg.reply_text("No valid image or GIF found in the replied message.")
+        return
+        
+    global start_banner_file_id
+    start_banner_file_id = file_id
+    await _db_set_start_banner(file_id)
+    await msg.reply_text("✅ Start menu banner updated successfully!")
+
+async def cmd_rmbanner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rmb or /rmbanner - removes the start menu banner"""
+    msg = update.effective_message
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
+        return
+        
+    global start_banner_file_id
+    start_banner_file_id = None
+    await _db_set_start_banner(None)
+    await msg.reply_text("✅ Start menu banner removed.")
+
+def _get_start_text(user) -> str:
+    status = "Owner 👑" if _is_owner(user.id) else ("Admin 🛡️" if user.id in authorized_mods else "User 👤")
+    return (
+        f"Hello {user.first_name},\n"
+        f"How can I help you today?\n\n"
+        f"- User ID: `{user.id}`\n"
+        f"- Account Status: {status}\n"
+        f"- Bot Version: 1.5\n\n"
+        f"Choose an option below to get started."
     )
+
+def _get_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🤖 AI Features", callback_data="menu_ai"),
+            InlineKeyboardButton("🛡️ Moderation", callback_data="menu_mod")
+        ],
+        [
+            InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")
+        ],
+        [
+            InlineKeyboardButton("❌ Close", callback_data="menu_close")
+        ]
+    ])
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/start - Interactive rich menu."""
+    msg = update.effective_message
+    if msg is None or not msg.from_user:
+        return
+        
+    text = _get_start_text(msg.from_user)
+    keyboard = _get_main_keyboard()
+    
+    if start_banner_file_id:
+        try:
+            await msg.reply_animation(start_banner_file_id, caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            try:
+                await msg.reply_photo(start_banner_file_id, caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                await msg.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await msg.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user = query.from_user
+    
+    if data == "menu_close":
+        await query.message.delete()
+        return
+        
+    elif data == "menu_main":
+        if query.message.caption:
+            await query.edit_message_caption(
+                caption=_get_start_text(user),
+                reply_markup=_get_main_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await query.edit_message_text(
+                text=_get_start_text(user),
+                reply_markup=_get_main_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+    elif data == "menu_ai":
+        text = (
+            "🤖 **AI Features**\n\n"
+            "`/ai [prompt]` - Chat with the AI\n"
+            "`/speak [prompt]` - Generate voice responses\n"
+            "`/roast` - Roast someone in the chat\n"
+            "`/summary` - Summarize the recent conversation\n"
+            "`/id` - Describe a replied image"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]])
+        if query.message.caption:
+            await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        
+    elif data == "menu_mod":
+        text = (
+            "🛡️ **Moderation Tools**\n\n"
+            "`/ban` - Ban a user\n"
+            "`/unban` - Unban a user\n"
+            "`/kick` - Kick a user\n"
+            "`/lock` - Lock media (no forwards)\n"
+            "`/mute` / `/unmute` - Toggle chat mute on locked media\n"
+            "*(Links & Jailbreaks are filtered automatically)*"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]])
+        if query.message.caption:
+            await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        
+    elif data == "menu_settings":
+        text = (
+            "⚙️ **Settings** (Owner Only)\n\n"
+            "`/setbanner` - Reply to an image/GIF to set the start menu banner\n"
+            "`/rmb` - Remove the start menu banner\n"
+            "`/ground` - Disable AI in current chat\n"
+            "`/free` - Enable AI in current chat\n"
+            "`/uground` - Disable AI globally\n"
+            "`/ufree` - Enable AI globally"
+        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]])
+        if query.message.caption:
+            await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -2016,6 +2188,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("uground", cmd_ground_global))
     app.add_handler(CommandHandler("ufree", cmd_unground_global))
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("setbanner", cmd_setbanner))
+    app.add_handler(CommandHandler("rmb", cmd_rmbanner))
+    app.add_handler(CommandHandler("rmbanner", cmd_rmbanner))
+    app.add_handler(CallbackQueryHandler(button_callback_handler, pattern="^menu_"))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("lock", cmd_lock))
