@@ -95,6 +95,64 @@ MAX_LIST_DISPLAY: int = 40  # max items shown in /listlocks & /seen
 WARN_MUTE_SECONDS: int = 60
 LOCKED_MEDIA_MUTE_SECONDS: int = 15
 
+async def cmd_unground_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ufree — re-enables AI globally"""
+    msg = update.effective_message
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
+        return
+        
+    import ai_handler
+    ai_handler.global_grounded = False
+    await _db_set_global_grounded(False)
+    await msg.reply_text("✅ AI has been globally re-enabled.")
+
+async def cmd_ground(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ground — turns off AI features for the current chat"""
+    msg = update.effective_message
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
+        return
+        
+    chat_id = msg.chat_id
+    import ai_handler
+    ai_handler.grounded_chats.add(chat_id)
+    await _db_set_chat_grounded(chat_id, True)
+    await msg.reply_text("no daddy noooo,me will be a goodboy daddy plijjjj dont ground me daddy 😭")
+
+async def cmd_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/free — un-grounds the AI for the current chat"""
+    msg = update.effective_message
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
+        return
+        
+    chat_id = msg.chat_id
+    import ai_handler
+    ai_handler.grounded_chats.discard(chat_id)
+    await _db_set_chat_grounded(chat_id, False)
+    await msg.reply_text("✅ I'm free! AI features have been re-enabled for this chat.")
+
+async def cmd_ground_global(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/uground — turns off AI features globally across all chats"""
+    msg = update.effective_message
+    if not msg: return
+    user = msg.from_user
+    if user and not _is_owner(user.id):
+        await msg.reply_text("🚫 Only the owner can use this command.")
+        return
+        
+    import ai_handler
+    ai_handler.global_grounded = True
+    await _db_set_global_grounded(True)
+    await msg.reply_text("🛑 AI has been globally grounded across all chats.")
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -249,6 +307,22 @@ CREATE TABLE IF NOT EXISTS link_blacklist (
     user_id INTEGER NOT NULL,
     PRIMARY KEY (chat_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS ai_chat_settings (
+    chat_id INTEGER PRIMARY KEY,
+    is_grounded INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ai_global_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    is_global_grounded INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS ban_queue (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
 """
 
 
@@ -288,6 +362,23 @@ async def _db_add_blocked(uid: str) -> None:
 
 async def _db_remove_blocked(uid: str) -> None:
     await db_conn.execute("DELETE FROM blocked_media WHERE uid = ?", (uid,))
+    await db_conn.commit()
+
+
+async def _db_set_chat_grounded(chat_id: int, is_grounded: bool) -> None:
+    await db_conn.execute(
+        "INSERT INTO ai_chat_settings (chat_id, is_grounded) VALUES (?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET is_grounded=EXCLUDED.is_grounded",
+        (chat_id, 1 if is_grounded else 0)
+    )
+    await db_conn.commit()
+
+async def _db_set_global_grounded(is_grounded: bool) -> None:
+    await db_conn.execute(
+        "INSERT INTO ai_global_settings (id, is_global_grounded) VALUES (1, ?) "
+        "ON CONFLICT(id) DO UPDATE SET is_global_grounded=EXCLUDED.is_global_grounded",
+        (1 if is_grounded else 0,)
+    )
     await db_conn.commit()
 
 
@@ -419,15 +510,23 @@ async def load_all() -> None:
         authorized_mods = [r["user_id"] for r in await cursor.fetchall()]
 
     async with db_conn.execute("SELECT chat_id, enabled FROM chat_mute_settings") as cursor:
-        chat_mute_settings = {
-            str(r["chat_id"]): bool(r["enabled"])
-            for r in await cursor.fetchall()
-        }
+        chat_mute_settings = {str(r["chat_id"]): bool(r["enabled"]) for r in await cursor.fetchall()}
 
     async with db_conn.execute("SELECT chat_id, user_id FROM link_blacklist") as cursor:
-        link_blacklist = {}
+        link_blacklist.clear()
         for r in await cursor.fetchall():
-            link_blacklist.setdefault(str(r["chat_id"]), []).append(str(r["user_id"]))
+            chat_id_str = str(r["chat_id"])
+            if chat_id_str not in link_blacklist:
+                link_blacklist[chat_id_str] = set()
+            link_blacklist[chat_id_str].add(str(r["user_id"]))
+
+    import ai_handler
+    async with db_conn.execute("SELECT chat_id FROM ai_chat_settings WHERE is_grounded = 1") as cursor:
+        ai_handler.grounded_chats = {r["chat_id"] for r in await cursor.fetchall()}
+        
+    async with db_conn.execute("SELECT is_global_grounded FROM ai_global_settings WHERE id = 1") as cursor:
+        row = await cursor.fetchone()
+        ai_handler.global_grounded = bool(row["is_global_grounded"]) if row else False
 
     import logging
     logging.getLogger("modbot").info(
@@ -441,6 +540,37 @@ async def load_all() -> None:
         len(chat_mute_settings),
         len(link_blacklist),
     )
+
+
+# ---------------------------------------------------------------------------
+# Background task for /banall
+# ---------------------------------------------------------------------------
+
+async def ban_queue_poller(application):
+    """Background task to poll the ban_queue table and execute bans."""
+    import asyncio
+    while True:
+        try:
+            if db_conn:
+                async with db_conn.execute("SELECT chat_id, user_id FROM ban_queue") as cursor:
+                    rows = await cursor.fetchall()
+                    
+                for row in rows:
+                    chat_id = row["chat_id"]
+                    user_id = row["user_id"]
+                    try:
+                        await application.bot.ban_chat_member(chat_id, user_id)
+                        logger.info(f"Ban queue poller: Banned {user_id} in {chat_id}")
+                    except Exception as e:
+                        logger.warning(f"Ban queue poller: Failed to ban {user_id} in {chat_id}: {e}")
+                    
+                    # Remove from queue whether it succeeded or failed (e.g. user already left)
+                    await db_conn.execute("DELETE FROM ban_queue WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+                    await db_conn.commit()
+        except Exception as e:
+            logger.error(f"Ban queue poller error: {e}")
+            
+        await asyncio.sleep(5)  # Poll every 5 seconds
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +700,7 @@ def _is_link_blacklisted(chat_id: int, user_id: int) -> bool:
     """Return True if *user_id* is on the link-deletion blacklist for
     *chat_id*.
     """
-    return str(user_id) in link_blacklist.get(str(chat_id), [])
+    return str(user_id) in link_blacklist.get(str(chat_id), set())
 
 
 async def _add_link_blacklist(chat_id: int, user_id: int) -> None:
@@ -578,9 +708,9 @@ async def _add_link_blacklist(chat_id: int, user_id: int) -> None:
     persist it.
     """
     key = str(chat_id)
-    members = link_blacklist.setdefault(key, [])
-    if str(user_id) not in members:
-        members.append(str(user_id))
+    if key not in link_blacklist:
+        link_blacklist[key] = set()
+    link_blacklist[key].add(str(user_id))
     await _db_add_link_blacklist(chat_id, user_id)
 
 
@@ -589,8 +719,8 @@ async def _remove_link_blacklist(chat_id: int, user_id: int) -> bool:
     Returns True if the user was present and removed.
     """
     key = str(chat_id)
-    members = link_blacklist.get(key, [])
-    if str(user_id) not in members:
+    members = link_blacklist.get(key)
+    if not members or str(user_id) not in members:
         return False
     members.remove(str(user_id))
     if not members:
@@ -1843,7 +1973,9 @@ async def _post_init(app: Application) -> None:  # noqa: ARG001
     await db_connect()
     await db_init_schema()
     await load_all()
-
+    
+    import asyncio
+    asyncio.create_task(ban_queue_poller(app))
 
 async def _post_shutdown(app: Application) -> None:  # noqa: ARG001
     """Runs once during a clean shutdown — closes the database pool."""
@@ -1866,6 +1998,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("ban", cmd_ban))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("kick", cmd_kick))
+    app.add_handler(CommandHandler("ground", cmd_ground))
+    app.add_handler(CommandHandler("free", cmd_free))
+    app.add_handler(CommandHandler("uground", cmd_ground_global))
+    app.add_handler(CommandHandler("ufree", cmd_unground_global))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("id", cmd_id))

@@ -40,6 +40,10 @@ TEXT_MODELS_GROQ = [
 chat_histories = {}
 MAX_HISTORY = 4
 
+# AI Grounding State
+grounded_chats = set()
+global_grounded = False
+
 async def _get_and_update_history(chat_id: int, prompt: str) -> list[dict]:
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
@@ -209,9 +213,13 @@ async def _send_voice_reply_if_needed(msg, reply_text, prompt, context, is_voice
     return False
 
 async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/speak <prompt> command"""
+    """/speak <prompt> command for voice response"""
     msg = update.effective_message
     if not msg:
+        return
+        
+    if global_grounded or msg.chat_id in grounded_chats:
+        await msg.reply_text("🛑 AI features are currently grounded in this chat.")
         return
         
     prompt = " ".join(context.args) if context.args else ""
@@ -374,6 +382,11 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     msg = update.effective_message
     if not msg: return
     chat_id = msg.chat_id
+    
+    if global_grounded or chat_id in grounded_chats:
+        await msg.reply_text("🛑 AI features are currently grounded in this chat.")
+        return
+        
     if chat_id not in chat_histories or not chat_histories[chat_id]:
         await msg.reply_text("No recent conversation history to summarize yet.")
         return
@@ -394,6 +407,10 @@ async def cmd_roast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     if not msg: return
     
+    if global_grounded or msg.chat_id in grounded_chats:
+        await msg.reply_text("🛑 AI features are currently grounded in this chat.")
+        return
+        
     target_name = ""
     if msg.reply_to_message and msg.reply_to_message.from_user:
         target_name = msg.reply_to_message.from_user.first_name
@@ -646,6 +663,10 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not msg:
         return
         
+    if global_grounded or msg.chat_id in grounded_chats:
+        await msg.reply_text("🛑 AI features are currently grounded in this chat.")
+        return
+        
     prompt = " ".join(context.args) if context.args else ""
     if not prompt:
         await msg.reply_text("Please provide a prompt: `/ai what is 2+2?`", parse_mode="Markdown")
@@ -752,6 +773,9 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 await msg.reply_text(roast)
                 await _log_ai_usage(msg, prompt, roast, context)
                 return
+
+        if global_grounded or chat_id in grounded_chats:
+            return
 
         reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner, is_gf=is_gf, update=update, context=context)
         await _append_ai_response(chat_id, reply)

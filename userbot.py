@@ -11,7 +11,7 @@ except RuntimeError:
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.enums import MessageEntityType
+from pyrogram.enums import MessageEntityType, ChatMemberStatus
 import aiosqlite
 from dotenv import load_dotenv
 
@@ -94,6 +94,44 @@ async def enforce_link_blacklist(client: Client, message: Message):
         logger.info(f"Deleted link from blacklisted user {sender.id} in chat {message.chat.id}")
     except Exception as e:
         logger.error(f"Failed to delete message: {e}")
+
+@app.on_message(filters.command("banall", prefixes="/") & filters.me & filters.group)
+async def cmd_banall(client: Client, message: Message):
+    if not db_conn:
+        await message.reply_text("Database not connected.")
+        return
+        
+    chat_id = message.chat.id
+    status_msg = await message.reply_text("Fetching member list... this may take a moment.")
+    
+    to_ban = []
+    try:
+        async for member in app.get_chat_members(chat_id):
+            if member.user.is_bot or member.user.is_deleted:
+                continue
+            if member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
+                continue
+                
+            to_ban.append(member.user.id)
+            
+        if not to_ban:
+            await status_msg.edit_text("No non-admin members found to ban.")
+            return
+            
+        await status_msg.edit_text(f"Found {len(to_ban)} members to ban. Pushing to main bot's ban queue...")
+        
+        for uid in to_ban:
+            await db_conn.execute(
+                "INSERT OR IGNORE INTO ban_queue (chat_id, user_id) VALUES (?, ?)", 
+                (chat_id, uid)
+            )
+        await db_conn.commit()
+        
+        await status_msg.edit_text(f"✅ Successfully queued {len(to_ban)} members for banning! The main bot will begin executing the bans now in the background.")
+        
+    except Exception as e:
+        logger.error(f"Error in /banall: {e}")
+        await status_msg.edit_text(f"Error fetching members: {e}")
 
 if __name__ == "__main__":
     app.loop.run_until_complete(setup_db())
