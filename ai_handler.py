@@ -16,8 +16,8 @@ logger = logging.getLogger("aibot")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-groq_client = AsyncGroq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY, http_options={'timeout': 15.0}) if GEMINI_API_KEY else None
+groq_client = AsyncGroq(api_key=GROQ_API_KEY, timeout=15.0) if GROQ_API_KEY else None
 
 # Cooldown tracking: chat_id -> timestamp
 last_auto_reply = {}
@@ -188,7 +188,7 @@ async def _send_voice_reply_if_needed(msg, reply_text, prompt, context, is_voice
 
     if should_send_voice and groq_client:
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/audio/speech",
                     headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY')}"},
@@ -252,7 +252,7 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         import httpx
         import io
         import os
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 "https://api.groq.com/openai/v1/audio/speech",
                 headers={"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY')}"},

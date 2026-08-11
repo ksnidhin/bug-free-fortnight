@@ -2194,6 +2194,7 @@ def build_application() -> Application:
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(True)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
