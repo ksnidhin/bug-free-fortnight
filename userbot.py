@@ -97,6 +97,12 @@ async def enforce_link_blacklist(client: Client, message: Message):
 
 @app.on_message(filters.command("banall", prefixes="/") & filters.me & filters.group)
 async def cmd_banall(client: Client, message: Message):
+    import datetime
+    if message.date:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if (now - message.date).total_seconds() > 120:
+            return
+            
     if not db_conn:
         await message.reply_text("Database not connected.")
         return

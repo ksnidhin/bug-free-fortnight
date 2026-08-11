@@ -60,6 +60,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -1982,6 +1983,16 @@ async def _post_shutdown(app: Application) -> None:  # noqa: ARG001
     await db_close()
 
 
+async def filter_old_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram.ext import ApplicationHandlerStop
+    import datetime
+    
+    msg = update.effective_message
+    if msg and msg.date:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if (now - msg.date).total_seconds() > 120:
+            raise ApplicationHandlerStop
+
 def build_application() -> Application:
     """Construct and configure the Application with all handlers registered."""
     app = (
@@ -1991,6 +2002,8 @@ def build_application() -> Application:
         .post_shutdown(_post_shutdown)
         .build()
     )
+
+    app.add_handler(TypeHandler(Update, filter_old_updates), group=-1)
 
     # Commands
     app.add_handler(CommandHandler("mute", cmd_mute))
@@ -2054,7 +2067,7 @@ def build_application() -> Application:
 def main() -> None:
     logger.info("Starting Telegram Media Moderation Bot (demo_mode=%s)", DEMO_MODE)
     app = build_application()
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
