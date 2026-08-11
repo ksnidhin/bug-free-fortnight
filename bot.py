@@ -2012,7 +2012,7 @@ def _get_start_text(user) -> str:
         f"How can I help you today?\n\n"
         f"- User ID: `{user.id}`\n"
         f"- Account Status: {status}\n"
-        f"- Bot Version: 1.5\n\n"
+        f"- Bot Version: Saint\n\n"
         f"Choose an option below to get started."
     )
 
@@ -2020,7 +2020,7 @@ def _get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🤖 AI Features", callback_data="menu_ai"),
-            InlineKeyboardButton("🛡️ Moderation", callback_data="menu_mod")
+            InlineKeyboardButton("🛡️ Moderation", callback_data="menu_mod_1")
         ],
         [
             InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")
@@ -2090,17 +2090,41 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         else:
             await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         
-    elif data == "menu_mod":
+    elif data == "menu_mod_1":
         text = (
-            "🛡️ **Moderation Tools**\n\n"
+            "🛡️ **Moderation Tools (1/2)**\n\n"
             "`/ban` - Ban a user\n"
             "`/unban` - Unban a user\n"
             "`/kick` - Kick a user\n"
             "`/lock` - Lock media (no forwards)\n"
             "`/mute` / `/unmute` - Toggle chat mute on locked media\n"
-            "*(Links & Jailbreaks are filtered automatically)*"
+            "`/olock` - Owner lock media\n"
+            "`/unlock` - Unlock media\n"
+            "`/listlocks` - List active locks"
         )
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="menu_main")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back", callback_data="menu_main"), InlineKeyboardButton("▶️ Next", callback_data="menu_mod_2")]
+        ])
+        if query.message.caption:
+            await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        else:
+            await query.edit_message_text(text=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            
+    elif data == "menu_mod_2":
+        text = (
+            "🛡️ **Moderation Tools (2/2)**\n\n"
+            "`/whitelist` - Whitelist a user\n"
+            "`/unwhitelist` - Remove user from whitelist\n"
+            "`/warn` - Warn a user\n"
+            "`/auth` - Add authorized mod\n"
+            "`/deauth` - Remove authorized mod\n"
+            "`/bl` - Manage link blacklist\n"
+            "`/en` / `/enp` / `/dsp` - Manage media types\n"
+            "`/seen` - Show seen blocks"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Prev", callback_data="menu_mod_1"), InlineKeyboardButton("🔙 Back", callback_data="menu_main")]
+        ])
         if query.message.caption:
             await query.edit_message_caption(caption=text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         else:
