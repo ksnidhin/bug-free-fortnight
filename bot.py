@@ -327,6 +327,13 @@ CREATE TABLE IF NOT EXISTS ban_queue (
     PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS bot_groups (
+    chat_id INTEGER PRIMARY KEY,
+    title TEXT,
+    username TEXT,
+    is_active INTEGER DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS bot_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     start_banner_file_id TEXT
@@ -624,6 +631,22 @@ def _extract_media(msg: Message) -> tuple[str, str, str] | None:
 # Permission helpers
 # ---------------------------------------------------------------------------
 
+
+def update_bot_group(chat_id: int, title: str, username: str, is_active: int):
+    with closing(sqlite3.connect(DB_FILE)) as conn:
+        with closing(conn.cursor()) as c:
+            c.execute(
+                "INSERT INTO bot_groups (chat_id, title, username, is_active) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username, is_active=excluded.is_active",
+                (chat_id, title, username, is_active)
+            )
+        conn.commit()
+
+def get_active_bot_groups():
+    with closing(sqlite3.connect(DB_FILE)) as conn:
+        with closing(conn.cursor()) as c:
+            c.execute("SELECT chat_id, title, username FROM bot_groups WHERE is_active=1 ORDER BY title")
+            return c.fetchall()
 
 def _is_owner(user_id: int) -> bool:
     """Return True if *user_id* is the bot owner."""
@@ -2038,7 +2061,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
         
     text = _get_start_text(msg.from_user)
-    keyboard = _get_main_keyboard()
+    keyboard = _get_main_keyboard(msg.from_user.id)
     
     if start_banner_file_id:
         try:
@@ -2240,6 +2263,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("dsp", cmd_dsp))
     app.add_handler(CommandHandler("bl", cmd_bl))
     app.add_handler(CommandHandler("en", cmd_en))
+    app.add_handler(ChatMemberHandler(chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
 
     # Media tracking / enforcement — catches any message containing
     # supported media types, in groups and supergroups. Also runs
@@ -2265,6 +2289,22 @@ def build_application() -> Application:
 
     return app
 
+
+
+async def chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Track bot being added or removed from groups."""
+    result = update.my_chat_member
+    if not result:
+        return
+    chat = result.chat
+    if chat.type not in ["group", "supergroup"]:
+        return
+    
+    status = result.new_chat_member.status
+    if status in ["kicked", "left"]:
+        update_bot_group(chat.id, chat.title, chat.username, 0)
+    elif status in ["member", "administrator"]:
+        update_bot_group(chat.id, chat.title, chat.username, 1)
 
 def main() -> None:
     logger.info("Starting Telegram Media Moderation Bot (demo_mode=%s)", DEMO_MODE)
