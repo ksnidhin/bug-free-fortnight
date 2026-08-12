@@ -238,7 +238,9 @@ async def cmd_speak(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Generate text response
     import os
-    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
+    owners_str = os.getenv("OWNERS", "")
+    owner_ids = [int(x.strip()) for x in owners_str.split(",") if x.strip()]
+    is_owner = msg.from_user.id in owner_ids
     is_gf = msg.from_user.id == 8887888107
     reply_text = await generate_ai_response(history, is_owner=is_owner, is_gf=is_gf, update=update, context=context)
     await _append_ai_response(msg.chat_id, reply_text)
@@ -680,7 +682,9 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         prompt = f"[Audio Transcription: {transcription}]\n\n" + prompt
     img = await _extract_base64_image(msg)
     import os
-    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0))
+    owners_str = os.getenv("OWNERS", "")
+    owner_ids = [int(x.strip()) for x in owners_str.split(",") if x.strip()]
+    is_owner = msg.from_user.id in owner_ids
     reply = await generate_ai_response(history, base64_image=img, is_owner=is_owner, update=update, context=context)
     await _append_ai_response(msg.chat_id, reply)
     await msg.reply_text(reply)
@@ -708,7 +712,9 @@ async def check_auto_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     text_lower = text.lower()
     
     import os
-    is_owner = msg.from_user.id == int(os.getenv("OWNER_ID", 0)) if msg.from_user else False
+    owners_str = os.getenv("OWNERS", "")
+    owner_ids = [int(x.strip()) for x in owners_str.split(",") if x.strip()]
+    is_owner = msg.from_user.id in owner_ids if msg.from_user else False
     is_gf = msg.from_user.id == 8887888107 if msg.from_user else False
 
     # Fast local anti-jailbreak and link filter (0 API calls, instantaneous)

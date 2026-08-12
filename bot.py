@@ -72,7 +72,8 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
-OWNER_ID: int = int(os.getenv("OWNER_ID", "0"))
+owners_str = os.getenv("OWNERS", "")
+OWNER_IDS = [int(x.strip()) for x in owners_str.split(",") if x.strip()]
 LOG_CHAT_ID: int | None = (
     int(os.getenv("LOG_CHAT_ID")) if os.getenv("LOG_CHAT_ID") else None
 )
@@ -81,8 +82,8 @@ SQLITE_PATH = "data/bot_data.db"
 
 if not BOT_TOKEN:
     sys.exit("ERROR: BOT_TOKEN is not set. Check your .env file.")
-if not OWNER_ID:
-    sys.exit("ERROR: OWNER_ID is not set. Check your .env file.")
+if not OWNER_IDS:
+    sys.exit("ERROR: OWNERS is not set in .env file.")
 if False: # if not DATABASE_URL:
     sys.exit(
         "ERROR: DATABASE_URL is not set. Check your .env file. "
@@ -626,7 +627,7 @@ def _extract_media(msg: Message) -> tuple[str, str, str] | None:
 
 def _is_owner(user_id: int) -> bool:
     """Return True if *user_id* is the bot owner."""
-    return user_id == OWNER_ID
+    return user_id in OWNER_IDS
 
 
 def _is_authorized_mod(user_id: int) -> bool:
