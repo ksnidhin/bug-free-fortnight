@@ -54,7 +54,7 @@ from dotenv import load_dotenv
 from telegram import ChatPermissions, Message, Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatMemberStatus, ChatType, ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
-from ai_handler import cmd_ai, check_auto_ai, cmd_speak, cmd_summary, cmd_roast
+from ai_handler import cmd_ai, check_auto_ai, cmd_speak, cmd_summary, cmd_roast, check_scramble_game
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1069,6 +1069,8 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if await _enforce_link_blacklist(msg, context):
         return
 
+    if await check_scramble_game(update, context):
+        return
 
     await check_auto_ai(update, context)
 
